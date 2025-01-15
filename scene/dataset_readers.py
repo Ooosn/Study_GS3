@@ -211,6 +211,7 @@ def readNerfSyntheticInfo(path, white_background, eval, view_num, valid=False, e
         # Only used for visualization, we use 400 frames for visualization
         print("Reading Training Transforms")
         train_cam_infos = readCamerasFromTransforms(path, "transforms_train.json", white_background, 400, extension)
+        # Here actually don't provide the 400 real photos from different but continuous perspective 
         print("Reading Test Transforms")
         test_cam_infos = readCamerasFromTransforms(path, "transforms_valid.json", white_background, 400, extension)
     else:

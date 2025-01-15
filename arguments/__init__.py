@@ -21,13 +21,13 @@ class ParamGroup:
         group = parser.add_argument_group(name)
         for key, value in vars(self).items():
             shorthand = False
-            if key.startswith("_"):
+            if key.startswith("_"):        #检查参数是否支持简写，即使用'-'+首字母作为简写
                 shorthand = True
-                key = key[1:]
+                key = key[1:]              #去掉下划线
             t = type(value)
             value = value if not fill_none else None 
             if shorthand:
-                if t == bool:
+                if t == bool:   #如果参数是布尔类型，则添加一个store_true的action，此外由于key已经规范化，所以可以直接使用key[0:1]
                     group.add_argument("--" + key, ("-" + key[0:1]), default=value, action="store_true")
                 else:
                     group.add_argument("--" + key, ("-" + key[0:1]), default=value, type=t)
@@ -38,11 +38,11 @@ class ParamGroup:
                     group.add_argument("--" + key, default=value, type=t)
 
     def extract(self, args):
-        group = GroupParams()
-        for arg in vars(args).items():
-            if arg[0] in vars(self) or ("_" + arg[0]) in vars(self):
-                setattr(group, arg[0], arg[1])
-        return group
+        group = GroupParams()   #创建一个空对象，用于存储修改后的参数
+        for arg in vars(args).items():  #vars(args) 返回的是 args 的属性和它们的值组成的字典    #items() 以列表返回可遍历的(键, 值) 元组数组
+            if arg[0] in vars(self) or ("_" + arg[0]) in vars(self):   #vars(self) 返回的是 self 的属性和它们的值组成的字典,因此检测当前属性名是否在 self 对象的属性中
+                setattr(group, arg[0], arg[1])  #super().__setattr__ 只能操作当前对象（self）的属性
+        return group #返回修改后的对象
 
 class ModelParams(ParamGroup): 
     def __init__(self, parser, sentinel=False):
@@ -53,9 +53,9 @@ class ModelParams(ParamGroup):
         self._resolution = -1
         self._white_background = False
         self.data_device = "cuda"
-        self.eval = False
+        self.eval = True
         self.hdr = False
-        self.use_nerual_phasefunc = False
+        self.use_nerual_phasefunc = True
         # input images upper limit
         self.view_num = 2000
         # MLP parameter
@@ -68,8 +68,8 @@ class ModelParams(ParamGroup):
         # basis angular Gaussian num
         self.basis_asg_num = 8
         # optimize cam and pl or not
-        self.cam_opt= False
-        self.pl_opt= False
+        self.cam_opt= True
+        self.pl_opt= True
         # maximum gaussian number
         self.maximum_gs = 550_000
         super().__init__(parser, "Loading Parameters", sentinel)

@@ -21,11 +21,11 @@ from arguments import ModelParams
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
 from utils.graphics_utils import fov2focal
 
-class Scene:
+class Scene:       
 
     gaussians : GaussianModel
-
-    def __init__(self, args : ModelParams, 
+                          
+    def __init__(self, args : ModelParams,  # 传入模型参数
                  gaussians : GaussianModel, 
                  opt=None, 
                  load_iteration=None, 
@@ -33,6 +33,12 @@ class Scene:
                  resolution_scales=[1.0], 
                  valid=False):
         """b
+        args: Parameters for the model, including paths and configurations.
+        gaussians: The Gaussian model for the scene.
+        opt: Optional optimization settings.
+        load_iteration: Specifies a specific iteration to load, or -1 for the latest.
+        shuffle: Whether to shuffle the training and testing cameras.
+        resolution_scales: List of scales for resolution during training. Default is [1.0]
         :param path: Path to Blender scene main folder.
         """
         self.model_path = args.model_path
@@ -49,8 +55,11 @@ class Scene:
         self.train_cameras = {}
         self.test_cameras = {}
 
+        #仅判断是否存在transforms_train.json文件，如果存在则认为是Blender数据集，随后在sceneLoadTypeCallbacks中调用Blender函数加载训练和测试集的相机信息
         if os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
             print("Found transforms_train.json file, assuming Blender data set!")
+
+            # scene_info 获得的是一个 SceneInfo 对象，包含了场景的所有信息，比如训练集和测试集的相机信息、点云信息、图片信息等
             scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval, args.view_num, \
                                                            valid=valid, extension=".exr" if args.hdr else ".png")
         else:
@@ -76,6 +85,7 @@ class Scene:
 
         self.cameras_extent = scene_info.nerf_normalization["radius"]
 
+        # 按照缩放比例分类，默认只有原始分辨率
         for resolution_scale in resolution_scales:
             print("Loading Training Cameras")
             self.train_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.train_cameras, resolution_scale, args)
@@ -96,8 +106,11 @@ class Scene:
             self.optimizing = False
 
         self.save_scale = 1.0
-        if opt is not None:
+        if opt is not None:     #opt应该是肯定存在的，除非出了问题，没太懂这里的条件判断
+
             # optimizer for camera and light
+            # get_expon_lr_func: 根据迭代次数，衰减步数以及延迟系数生成一个指数衰减的学习率函数
+            # 后面直接使用 self.cam_scheduler_args(iteration) 来获取当前迭代次数下的学习率
             self.cam_scheduler_args = get_expon_lr_func(lr_init=opt.opt_cam_lr_init,
                                                     lr_final=opt.opt_cam_lr_final,
                                                     lr_delay_steps=opt.opt_cam_lr_delay_step,

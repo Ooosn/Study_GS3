@@ -113,8 +113,8 @@ def loadCam(args, id, cam_info, resolution_scale):
 def cameraList_from_camInfos(cam_infos, resolution_scale, args):
     camera_list = []
 
-    for id, c in enumerate(cam_infos):
-        camera_list.append(loadCam(args, id, c, resolution_scale))
+    for id, cam_info in enumerate(cam_infos):
+        camera_list.append(loadCam(args, id, cam_info, resolution_scale))
     
     return camera_list
 

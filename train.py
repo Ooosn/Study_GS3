@@ -29,6 +29,7 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
 
+#training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.unfreeze_iterations, args.debug_from)
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, unfreeze_iterations, debug_from):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
@@ -64,8 +65,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         phase_func_freezed = True
         
     # initialize parallel GPU stream 
-    light_stream = torch.cuda.Stream()
-    calc_stream = torch.cuda.Stream()
+    light_stream = torch.cuda.current_stream()
+    calc_stream = torch.cuda.current_stream()
     
     for iteration in range(first_iter, opt.iterations + 1):
         iter_start.record()
@@ -306,16 +307,21 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
-    args = parser.parse_args(sys.argv[1:])
-    args.save_iterations.append(args.iterations)
+
+    # 令 args 包含 parser 中定义的所有参数的键和值
+    args = parser.parse_args(sys.argv[1:])  # argument vector， 第一位是文件名，所以从第二位开始解析
+    args.save_iterations.append(args.iterations)    # 将最后一个迭代次数加入保存迭代次数列表
     
+    # Prepare training
     print("Optimizing " + args.model_path)
 
     # Initialize system state (RNG)
-    safe_state(args.quiet)
+    safe_state(args.quiet)  #设置输出流是否静默
 
     # Start GUI server, configure and run training
-    torch.autograd.set_detect_anomaly(args.detect_anomaly)
+    torch.autograd.set_detect_anomaly(args.detect_anomaly)  #如果命令行参数中包含 --detect_anomaly，则根据 stong_true 设置为True，将进行异常检测
+    
+    # Start training
     training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.unfreeze_iterations, args.debug_from)
 
     # All done

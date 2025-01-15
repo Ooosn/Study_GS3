@@ -18,6 +18,49 @@ from utils.graphics_utils import fov2focal
 WARNED = False
 
 def loadCam(args, id, cam_info, resolution_scale):
+    """
+    Load and process camera information and image data.
+    Args:
+        args: An object containing various arguments and settings, including:
+            - hdr (bool): Flag indicating if HDR images are used.
+            - resolution (int): Resolution scaling factor.
+            - data_device (str): Device to load data onto.
+        id (int): Unique identifier for the camera.
+        cam_info: An object containing camera information, including:
+            - height (int): Original height of the image.
+            - width (int): Original width of the image.
+            - image (PIL.Image or similar): The image data.
+            - cx (float): Camera principal point x-coordinate.
+            - cy (float): Camera principal point y-coordinate.
+            - uid (int): Unique identifier for the camera.
+            - R (np.ndarray): Rotation matrix.
+            - T (np.ndarray): Translation vector.
+            - FovX (float): Field of view in the x direction.
+            - FovY (float): Field of view in the y direction.
+            - pl_pos (np.ndarray): Position of the point light.
+            - pl_intensity (np.ndarray): Intensity of the point light.
+            - image_name (str): Name of the image file.
+            - image_path (str): Path to the image file.
+        resolution_scale (float): Scaling factor for the resolution.
+    Returns:
+        Camera: A Camera object with the following attributes:
+            - colmap_id (int): Unique identifier for the camera.
+            - R (np.ndarray): Rotation matrix.
+            - T (np.ndarray): Translation vector.
+            - FoVx (float): Field of view in the x direction.
+            - FoVy (float): Field of view in the y direction.
+            - cx (float): Camera principal point x-coordinate.
+            - cy (float): Camera principal point y-coordinate.
+            - image (torch.Tensor): Processed image tensor.
+            - gt_alpha_mask (torch.Tensor or None): Ground truth alpha mask if available.
+            - pl_pos (np.ndarray): Position of the point light.
+            - pl_intensity (np.ndarray): Intensity of the point light.
+            - image_name (str): Name of the image file.
+            - uid (int): Unique identifier for the camera.
+            - data_device (str): Device to load data onto.
+            - is_hdr (bool): Flag indicating if HDR images are used.
+            - image_path (str): Path to the image file.
+    """
     if args.hdr:
         orig_h = cam_info.height
         orig_w = cam_info.width
@@ -65,6 +108,8 @@ def loadCam(args, id, cam_info, resolution_scale):
                   image_name=cam_info.image_name, uid=id, data_device=args.data_device, 
                   is_hdr=args.hdr, image_path=cam_info.image_path)
 
+# Load cameras from a list of CameraInfo objects and return a list of Camera objects
+# 根据 resolution_scale 和 args 从 CameraInfo 对象列表中加载相机和对应的图片进行修改，返回 Camera 对象列表
 def cameraList_from_camInfos(cam_infos, resolution_scale, args):
     camera_list = []
 

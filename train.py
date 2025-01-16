@@ -32,12 +32,17 @@ except ImportError:
 #training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.unfreeze_iterations, args.debug_from)
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, unfreeze_iterations, debug_from):
     first_iter = 0
+
+    # 准备输出和日志记录器，更新模型路径
     tb_writer = prepare_output_and_logger(dataset)
+
     gaussians = GaussianModel(dataset.sh_degree, use_MBRDF=dataset.use_nerual_phasefunc, basis_asg_num=dataset.basis_asg_num, \
                             hidden_feature_size=dataset.phasefunc_hidden_size, hidden_feature_layer=dataset.phasefunc_hidden_layers, \
                             phase_frequency=dataset.phasefunc_frequency, neural_material_size=dataset.neural_material_size,
                             maximum_gs=dataset.maximum_gs)
+
     scene = Scene(dataset, gaussians, opt=opt, shuffle=True)
+    
     gaussians.training_setup(opt)
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)

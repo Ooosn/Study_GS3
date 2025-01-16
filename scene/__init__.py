@@ -186,7 +186,9 @@ class Scene:
             # 保存时的分辨率，默认为1.0
             self.save_scale = resolution_scales[0]
 
-            #按照缩放比例遍历所有的相机，只将相机参数和光源参数添加到 cam_params 和 pl_params 中，不包括其他参数
+            # 按照缩放比例遍历所有的相机，只将相机参数和光源参数添加到 cam_params 和 pl_params 中，不包括其他参数
+            # camera对象的 cam_pose_adj 和 pl_adj 属性是一个 grad 为 true 的 tensor，用于保存相机参数和光源参数
+            # extend 这里传递地址，extend 适合迭代时添加元素，更简洁。
             for scale in resolution_scales:
                 cam_params.extend([self.train_cameras[scale][i].cam_pose_adj for i in range(len(self.train_cameras[scale]))])
                 cam_params.extend([self.test_cameras[scale][i].cam_pose_adj for i in range(len(self.test_cameras[scale]))])

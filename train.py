@@ -53,34 +53,51 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
     
-    # 设置背景颜色
+    # 设置背景颜色，1,1,1,1,0,0,0表示白色背景，0,0,0,0,0,0,0表示黑色背景
     bg_color = [1, 1, 1, 1, 0, 0, 0] if dataset.white_background else [0, 0, 0, 0, 0, 0, 0]
+    # 将 bg_color 转换为 PyTorch 的张量，并将其分配到 GPU（device="cuda"）以加速后续的计算。
+    # 
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
+    # 新建事件，用于记录迭代开始和结束的时间
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
 
-    prune_visibility = False
-    viewpoint_stack = None
-    opt_test = False
-    opt_test_ready = False
-    ema_loss_for_log = 0.0
-    progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
-    first_iter += 1
-    
-    # 
+    # 初始化一些训练过程中需要使用的变量
+    prune_visibility = False    # 可见性修剪，是否剔除不可见的点，可以释放内存，提高内存使用效率
+    viewpoint_stack = None    # 存储相机视点（viewpoints）的堆栈，在训练过程中，会从堆栈中弹出一个相机视点，用于渲染图像，从而完成对所有视角的遍历。
+    opt_test = False    # 当前是否处于优化测试模式
+    opt_test_ready = False    # 是否准备好进行优化测试
+    """
+    指数移动平均（EMA）损失，用于记录训练过程中的损失值，只是为了平滑损失曲线，更好地可视化训练过程，不参与模型的训练。
+    ema_loss_for_log = α * 当前损失 + (1 - α) * ema_loss_for_log 类似于梯度更新中的一阶动量。
+    """
+    ema_loss_for_log = 0.0    # 初始值为 0.0，表示尚未计算损失值
+    progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")    #使用 tqdm 创建一个可视化的进度条，用于显示训练的进度
+    first_iter += 1    # 迭代次数加一，开始下一次迭代
+    """
+    相位函数（Phase Function） 是一个来自图形学和物理学的概念，主要用于描述光与介质相互作用时，光的散射方向分布。
+    本文中，即为神经相位函数（Neural Phase Function），是一个用于描述材质表面散射特性的神经网络模型。
+    """
+    """
+    ASG（Anisotropic Spherical Gaussians, 各向异性球面高斯）
+    本文中，ASG 作为镜面反射的模型，用于描述材质表面的镜面反射特性。
+    """
+    # 用于记录是否冻结了相位函数
+    # 根据当前迭代次数，决定是否冻结相位函数
     phase_func_freezed = False
     asg_freezed = True
     if first_iter < unfreeze_iterations:
         gaussians.neural_phasefunc.freeze()
         phase_func_freezed = True
         
-    # initialize parallel GPU stream 
+    # initialize parallel GPU stream 多流并行
+    # 有时会出现错误，可以尝试关闭，改为串行，torch.cuda.current_stream().synchronize()
     light_stream = torch.cuda.current_stream()
     calc_stream = torch.cuda.current_stream()
     
-    for iteration in range(first_iter, opt.iterations + 1):
-        iter_start.record()
+    for iteration in range(first_iter, opt.iterations + 1):    #左闭右开区间，因此加1
+        iter_start.record()    # 记录迭代开始的时间
 
         # update lr of asg
         gaussians.update_learning_rate(iteration, \

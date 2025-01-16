@@ -40,8 +40,8 @@ class ParamGroup:
     def extract(self, args):
         group = GroupParams()   #创建一个空对象，用于存储修改后的参数
         for arg in vars(args).items():  #vars(args) 返回的是 args 的属性和它们的值组成的字典    #items() 以列表返回可遍历的(键, 值) 元组数组
-            if arg[0] in vars(self) or ("_" + arg[0]) in vars(self):   #vars(self) 返回的是 self 的属性和它们的值组成的字典,因此检测当前属性名是否在 self 对象的属性中
-                setattr(group, arg[0], arg[1])  #super().__setattr__ 只能操作当前对象（self）的属性
+            if arg[0] in vars(self) or ("_" + arg[0]) in vars(self):   #vars(self) 返回的是 self 的全部属性和它们的值组成的字典,因此检测当前属性名是否在 self 对象的属性中
+                setattr(group, arg[0], arg[1])  #super().__setattr__ 只能操作当前对象（self）的属性 # 用 arg[1] 覆盖 self 各个属性的原始值
         return group #返回修改后的对象
 
 class ModelParams(ParamGroup): 
@@ -72,10 +72,15 @@ class ModelParams(ParamGroup):
         self.pl_opt= True
         # maximum gaussian number
         self.maximum_gs = 550_000
-        super().__init__(parser, "Loading Parameters", sentinel)
+        # save time for debug
+        self.wang_debug = True
 
+        super().__init__(parser, "Loading Parameters", sentinel)
+        
     def extract(self, args):
         g = super().extract(args)
+
+        # os.path.abspath() 的参数为空字符串 ""，它会返回当前工作目录的绝对路径。
         g.source_path = os.path.abspath(g.source_path)
         return g
 

@@ -16,3 +16,5 @@ nohup*
 !real_train.sh
 !syn_render.sh
 !syn_train.sh
+train/
+test/

@@ -22,10 +22,27 @@ from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
 from utils.graphics_utils import fov2focal
 
 class Scene:       
+    
+    """
+    主要分为四个功能：
+        1. 加载场景数据集，无论是否加载旧模型都需要
+        对于非加载旧模型，则为重新训练，需要创建新的模型文件夹，并将点云文件拷贝到新建的模型文件夹下，准备训练集的相机信息，将相机信息写入到 cameras.json 文件中
+        而对于加载旧模型，该相机信息已经存在，所以不需要再次创建
+        2. 加载高斯模型，如果加载旧模型则直接从点云中加载高斯模型，否则从场景信息的点云信息中创建高斯模型
+        3. 优化相机参数和光源参数，根据命令行参数判断是否需要
+        4. 储存高斯模型以及，如果优化了的话，相机参数，
+        
+    重要的属性：
+        self.gaussians : GaussianModel 加载的高斯模型
+        self.train_cameras : dict   加载的训练集相机信息
+        self.test_cameras : dict    加载的测试集相机信息
+        以及可能被优化的相机和光源参数，储存于内存或文件中，在后面训练和测试的时候会用到
+    """
 
     gaussians : GaussianModel
                           
-    def __init__(self, args : ModelParams,  # 传入模型参数
+    def __init__(self, 
+                 args : ModelParams,  # 传入模型参数，这里的args其实就是前文的 dataset
                  gaussians : GaussianModel, 
                  opt=None, # opt ： OptimizationParams 类型，优化参数
                  load_iteration=None, 
@@ -41,10 +58,15 @@ class Scene:
         resolution_scales: List of scales for resolution during training. Default is [1.0]
         :param path: Path to Blender scene main folder.
         """
+        # 路径信息已经被更新/新建  tb_writer = prepare_output_and_logger(dataset)，在这里的 args 就是 train.py 中传递的 dataset
         self.model_path = args.model_path
+
         self.loaded_iter = None
         self.gaussians = gaussians
 
+        # 判断是否需要加载已训练的模型
+        # -1 代表加载最新的模型
+        # 其他数字代表加载指定迭代次数的模型
         if load_iteration:
             if load_iteration == -1:
                 self.loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"))
@@ -55,27 +77,36 @@ class Scene:
         self.train_cameras = {}
         self.test_cameras = {}
 
-        #仅判断是否存在transforms_train.json文件，如果存在则认为是Blender数据集，随后在sceneLoadTypeCallbacks中调用Blender函数加载训练和测试集的相机信息
+        # 无论是否加载已训练的模型，都需要加载场景数据集
+        # 仅判断是否存在transforms_train.json文件，如果存在则认为是Blender数据集，随后在sceneLoadTypeCallbacks中调用Blender函数加载训练和测试集的相机信息
         if os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
             print("Found transforms_train.json file, assuming Blender data set!")
-
+        
             # scene_info 获得的是一个 SceneInfo 对象，包含了场景的所有信息，比如训练集和测试集的相机信息、点云信息、图片信息等
             """            SceneInfo(point_cloud=pcd,
                            train_cameras=train_cam_infos,
                            test_cameras=test_cam_infos,
                            nerf_normalization=nerf_normalization,
-                           ply_path=ply_path)
+                           ply_path=ply_path)   # 点云信息地址，不存在则随机初始化
             """
-            scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval, args.view_num, \
+            if not args.wang_debug:
+                scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval, args.view_num, \
                                                            valid=valid, extension=".exr" if args.hdr else ".png")
         else:
             assert False, "Could not recognize scene type!"
 
+        # 场景信息部分
+        # 如果不加载已训练的模型，则进行初始化
+        # 1. 将点云文件拷贝到新建的模型文件夹下。
+        # 2. 准备训练签的相机信息，将相机信息写入到 cameras.json 文件中
         if not self.loaded_iter:
             with open(scene_info.ply_path, 'rb') as src_file, open(os.path.join(self.model_path, "input.ply") , 'wb') as dest_file:
+
                 dest_file.write(src_file.read())
+
             json_cams = []
             camlist = []
+
             if scene_info.test_cameras:
                 camlist.extend(scene_info.test_cameras)
             if scene_info.train_cameras:
@@ -85,6 +116,7 @@ class Scene:
             with open(os.path.join(self.model_path, "cameras.json"), 'w') as file:
                 json.dump(json_cams, file)
 
+        
         if shuffle:
             random.shuffle(scene_info.train_cameras)  # Multi-res consistent random shuffling
             random.shuffle(scene_info.test_cameras)  # Multi-res consistent random shuffling
@@ -107,23 +139,28 @@ class Scene:
             print("Loading Test Cameras")
             self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, args)
 
-        # 默认 load_iteration=None，即不加载已训练的模型，而是直接从点云中创建高斯模型
-        # 如果 load_iteration 不为空，则从指定的迭代次数中加载模型，文件名为
+        
+        # 高斯部分
+        # 如果需要加载已训练的模型，则直接从点云中加载高斯模型
         if self.loaded_iter:                                        # os.path.join 可输入多个参数，将多个参数拼接成一个路径
             self.gaussians.load_ply(os.path.join(self.model_path,   # 模型路径 + 子文件夹 point_cloud + iteration_ + 迭代次数 子文件夹 + point_cloud.ply 文件
                                                            "point_cloud",
                                                            "iteration_" + str(self.loaded_iter),
                                                            "point_cloud.ply"))
-        else:
+        # 如果不加载已训练的模型，则从场景信息的点云信息中创建高斯模型（默认是创建随机点云，如果没有其他渠道获得场景对应的点云信息）
+        else: 
             self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
 
-        # 如果cam_opt或pl_opt为True，则进行优化，默认为True
+        # 优化部分
+        # 判断是否需要优化相机参数和光源参数
+        # 如果cam_opt或pl_opt为True，则进行优化，默认为True #怀疑这里的逻辑有问题，应该是优化的时候才设置为True，在后续的运行中，他们也做了区分，但实际上这里是中为true
         if args.cam_opt or args.pl_opt:
             self.optimizing = True
         else:
             self.optimizing = False
 
         self.save_scale = 1.0
+
         if opt is not None:     #opt应该是肯定存在的，除非出了问题，没太懂这里的条件判断
 
             # optimizer for camera and light
@@ -191,7 +228,8 @@ class Scene:
                         lr = self.pl_scheduler_args(iteration)
                         param_group['lr'] = lr
     
-    # 保存高斯场景模型和相机参数
+
+    # 保存高斯模型和相机参数（因为可能优化了）
     def save(self, iteration):
 
         # 保存高斯场景模型
@@ -206,10 +244,12 @@ class Scene:
             fy = fov2focal(self.train_cameras[self.save_scale][0].FoVy, self.train_cameras[self.save_scale][0].image_height)
             intrinsics = [cx, cy, fx, fy]
 
-            # camera and point light in train set
+            
             # 默认第一个相机的内参作为全局内参，方便使用，后面的相机只保存相对于第一个相机的相对位置
             # 但是如果使用不同相机，则依然需要存储各个相机的内参，因此此处采用了两种内参存储方式。
-            cam_new = {'camera_intrinsics': intrinsics, "frames": []}
+
+            # camera and point light in train set
+            cam_new = {'camera_intrinsics': intrinsics, "frames": []}   #第一种方式，存储全局内参
             for i in range(len(self.train_cameras[self.save_scale])):
                 camnow = self.train_cameras[self.save_scale][i]
                 R, T, pl_pos = camnow.get("SO3xR3")
@@ -222,7 +262,7 @@ class Scene:
                     "R_opt": R.tolist(),
                     "T_opt": T.tolist(),
                     "pl_pos": pl_pos[0].tolist(),
-                    "camera_intrinsics": [camnow.cx, camnow.cy, focalx, focaly],
+                    "camera_intrinsics": [camnow.cx, camnow.cy, focalx, focaly],    #第二种方式，存储相对内参,考虑到可能使用不同相机
                 })
             with open(os.path.join(point_cloud_path, "transforms_train.json"), "w") as outfile:
                 json.dump(cam_new, outfile)

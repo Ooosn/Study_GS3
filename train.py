@@ -36,6 +36,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     # 准备输出和日志记录器，更新模型路径
     tb_writer = prepare_output_and_logger(dataset)
 
+    # 建立高斯对象，场景对象
     gaussians = GaussianModel(dataset.sh_degree, use_MBRDF=dataset.use_nerual_phasefunc, basis_asg_num=dataset.basis_asg_num, \
                             hidden_feature_size=dataset.phasefunc_hidden_size, hidden_feature_layer=dataset.phasefunc_hidden_layers, \
                             phase_frequency=dataset.phasefunc_frequency, neural_material_size=dataset.neural_material_size,
@@ -43,11 +44,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     scene = Scene(dataset, gaussians, opt=opt, shuffle=True)
     
+    # 初始化模型的训练设置
     gaussians.training_setup(opt)
+
+    # 如果提供了检查点路径，则加载模型和训练状态
+    # 检查点通常包含模型参数和训练迭代次数
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
-
+    
+    # 设置背景颜色
     bg_color = [1, 1, 1, 1, 0, 0, 0] if dataset.white_background else [0, 0, 0, 0, 0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 

@@ -190,6 +190,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         Ll1 = l1_loss(image, gt_image)
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+        
+        # 反向传播，计算各个参数的梯度
         loss.backward()
 
         iter_end.record()
@@ -216,6 +218,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # 只是用于优化场景光源和相机信息，因为这些信息是未知的，需要通过优化来估计
             # 不会用于直接优化高斯模型
                 if iteration < opt.iterations:
+                    """"
+                    在相机初始化时，cam_params 和 pl_params 都是 torch.nn.Parameter，默认开启了梯度计算（requires_grad=True）。
+                    因此，当 viewpoint_cam 中的每个视角（即相机对象）参与计算时，这些参数会被自动追踪并记录到计算图中。
+                    因为根据 torch 以及之前我们自己定义的函数，传递的都是地址，所以可以实现有效的一一对应的更新。
+
+                    由于 PyTorch 的机制，我们在初始化时传递的是参数的引用（内存地址），因此这些参数在计算图中的位置与原始定义的位置一一对应。
+                    换句话说，无论是在计算还是更新过程中，操作的始终是这个对象所包含的实际参数，确保了一一对应的关系。
+
+                    优化器通过初始化时绑定的参数引用（内存地址），能够直接访问这些参数的 .grad 属性。
+                    在调用 optimizer.step() 时，优化器根据计算出的梯度和设置的学习率更新参数值，实现了有效的一一对应更新。
+                    """
                     scene.optimizer.step()
                     scene.optimizer.zero_grad(set_to_none = True)
                     # do not optimize the scene

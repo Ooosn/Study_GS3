@@ -96,6 +96,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     light_stream = torch.cuda.current_stream()
     calc_stream = torch.cuda.current_stream()
     
+    """开始训练"""
+    # 每次迭代，都会从视点堆栈中选择一个视点，然后渲染图像，计算损失，更新模型参数，并不是每次计算全部视点的损失
     for iteration in range(first_iter, opt.iterations + 1):    #左闭右开区间，因此加1
         iter_start.record()    # 记录迭代开始的时间
 
@@ -113,6 +115,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                             pl_opt=dataset.pl_opt)
             
         # Every 1000 its we increase the levels of SH up to a maximum degree
+        # 采取神经网络后，不再使用球谐函数，因此不再需要逐级增加球谐函数的阶数
         if iteration % 1000 == 0:
             if not dataset.use_nerual_phasefunc:
                 gaussians.oneupSHdegree()
@@ -120,6 +123,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if iteration <= opt.asg_freeze_step:
             gaussians.asg_func.asg_scales.requires_grad_(False)
             gaussians.asg_func.asg_rotation.requires_grad_(False)
+        # else if iteration > opt.asg_freeze_step and asg_freezed:
+        # 后续的迭代中，asg_freezed 可能已为 False，所以不需要重新设置
         elif asg_freezed:
             asg_freezed = False
             gaussians.asg_func.asg_scales.requires_grad_(True)
@@ -127,22 +132,29 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             print("set ansio param requires_grad: ", gaussians.asg_func.asg_scales.requires_grad)
         
         # Pick a random Camera
+        # 如果视点堆栈为空，则根据 opt_test_ready 和 opt_test 的值，进行轮番选择训练视点和测试视点
         if not viewpoint_stack:
             # only do pose opt for test sets
             if opt_test_ready and scene.optimizing:
                 opt_test = True
+                # 重新填装测试视点堆栈
                 viewpoint_stack = scene.getTestCameras().copy()
                 opt_test_ready = False
             else:
                 opt_test = False
+                # 重新填装训练视点堆栈
                 viewpoint_stack = scene.getTrainCameras().copy()
                 opt_test_ready = True
+
+        # 为当前迭代选择一个视点
         viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
 
-        # Render
+        """！！！开始渲染"""
+        # debug用，一般不需要
         if (iteration - 1) == debug_from:
             pipe.debug = True
 
+        # 选择背景颜色，如果opt输出为随机背景，则随机选择一个背景颜色，否则使用固定背景颜色
         bg = torch.rand((7), device="cuda") if opt.random_background else background
         
         # precompute shading frames and ASG frames
@@ -181,7 +193,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         loss.backward()
 
         iter_end.record()
-            
+
+        # torch.no_grad() 用于关闭梯度计算，加速模型的预测和推理过程
         with torch.no_grad():
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
@@ -200,6 +213,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 scene.save(iteration)
 
             if opt_test and scene.optimizing:
+            # 只是用于优化场景光源和相机信息，因为这些信息是未知的，需要通过优化来估计
+            # 不会用于直接优化高斯模型
                 if iteration < opt.iterations:
                     scene.optimizer.step()
                     scene.optimizer.zero_grad(set_to_none = True)

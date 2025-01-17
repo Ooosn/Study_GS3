@@ -149,6 +149,7 @@ class Scene:
                                                            "point_cloud.ply"))
         # 如果不加载已训练的模型，则从场景信息的点云信息中创建高斯模型（默认是创建随机点云，如果没有其他渠道获得场景对应的点云信息）
         else: 
+            # create_from_pcd 中，会初始化神经网络 self.neural_phasefunc = Neural_phase(
             self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
 
         # 优化部分

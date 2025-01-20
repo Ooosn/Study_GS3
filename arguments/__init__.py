@@ -76,7 +76,7 @@ class ModelParams(ParamGroup):
         self.wang_debug = True
 
         super().__init__(parser, "Loading Parameters", sentinel)
-        
+
     def extract(self, args):
         g = super().extract(args)
 

@@ -214,9 +214,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
 
-            if opt_test and scene.optimizing:
-            # 只是用于优化场景光源和相机信息，因为这些信息是未知的，需要通过优化来估计
-            # 不会用于直接优化高斯模型
+            if opt_test and scene.optimizing:  
+                """这里是否有一个漏洞，当 scene.optimizing 为 false 时，测试集也会进入后续的 else 分支，但是本文中可能默认 optimizing 为 true ，阴差阳错"""
+                # 只是用于优化场景光源和相机信息，因为这些信息是未知的，需要通过优化来估计
+                # 不会用于直接优化高斯模型
                 if iteration < opt.iterations:
                     """"
                     在相机初始化时，cam_params 和 pl_params 都是 torch.nn.Parameter，默认开启了梯度计算（requires_grad=True）。
@@ -229,15 +230,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     优化器通过初始化时绑定的参数引用（内存地址），能够直接访问这些参数的 .grad 属性。
                     在调用 optimizer.step() 时，优化器根据计算出的梯度和设置的学习率更新参数值，实现了有效的一一对应更新。
                     """
+                    # 更新相机参数和光源参数
                     scene.optimizer.step()
+                    # 梯度清零
                     scene.optimizer.zero_grad(set_to_none = True)
-                    # do not optimize the scene
+                    # 梯度清零
                     gaussians.optimizer.zero_grad(set_to_none = True)
+
+            # 对于非测试集，即训练集进入正常阶段，进行高斯密集化，高斯修剪以及场景参数优化
             else:
-                # Densification
+                # Densification, 高斯复制或分裂
                 if iteration < opt.densify_until_iter:
-                    # Keep track of max radii in image-space for pruning
+                    # 记录在图像空间中可见高斯的最大半径，用于修剪
                     gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
+                    # 记录高斯密集化统计信息
                     gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter, image.shape[2], image.shape[1], render_pkg["out_weight"])
 
                     if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:

@@ -60,6 +60,7 @@ class GaussianModel:
         
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree  
+        # 高斯点云坐标
         self._xyz = torch.empty(0)
         self._features_dc = torch.empty(0)
         self._features_rest = torch.empty(0)
@@ -238,6 +239,8 @@ class GaussianModel:
 
         opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 
+        # 将高斯坐标、高斯特征、高斯透明度设置为可优化参数，开启梯度计算
+        # 传入 nn 前，需要将数据转换为 tensor 类型
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
         self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))

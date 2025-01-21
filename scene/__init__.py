@@ -200,6 +200,9 @@ class Scene:
             if self.optimizing:
                 # torch.optim.Adam 返回一个参数组对象，对象内维护了一个参数组列表，可以通过 self.optimizer.param_groups 访问，列表每个元素是一个参数组，用字典表示，其包含了优化器的参数
                 # 此时学习率为0，后面会根据迭代次数更新学习率
+                # - lr: 学习率（这里初始设为0.0）
+                # - name: 自定义参数组名称（可选，默认为None）
+                #   添加name是为了后续能够通过名字方便地找到并更新特定参数组的设置
                 self.optimizer = torch.optim.Adam(
                     [
                         {"params": cam_params, "lr" : 0.0, "name": "cam_adj"},

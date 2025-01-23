@@ -73,7 +73,7 @@ class ModelParams(ParamGroup):
         # maximum gaussian number
         self.maximum_gs = 550_000
         # save time for debug
-        self.wang_debug = True
+        self.wang_debug = False
 
         super().__init__(parser, "Loading Parameters", sentinel)
 

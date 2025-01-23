@@ -223,6 +223,10 @@ def render(viewpoint_camera,
             "viewspace_points": meta["means2d"],
             "visibility_filter" : radii > 0,
             "radii": radii,
+            # 权重值，由不透明度（累计得到的），2d覆盖范围，深度等信息得到的
+            # 例如：
+            # - 一个完全不透明、离相机很近、覆盖多个像素的点 -> 大权重
+            # - 一个半透明、离相机远、只覆盖一个像素的点 -> 小权重
             "out_weight": out_weight}
 
 def _dot(x, y):

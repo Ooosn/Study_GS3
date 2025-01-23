@@ -687,10 +687,12 @@ class GaussianModel:
     def prune_visibility_mask(self, out_weights_acc):
         n_before = self.get_xyz.shape[0]
         n_after = self.maximum_gs
+        # 维持高斯点云数量
         n_prune = n_before - n_after
         prune_mask = torch.zeros((self.get_xyz.shape[0],), dtype=torch.bool, device=self.get_xyz.device)
         if n_prune > 0:
             # Find the mask of top n_prune smallest `self.out_weights_accum`
+            # 找到权重值最小的 n_prune 个高斯点
             _, indices = torch.topk(out_weights_acc, n_prune, largest=False)
             prune_mask[indices] = True
         return prune_mask

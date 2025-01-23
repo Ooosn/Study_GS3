@@ -168,6 +168,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         else:
             render_pkg = render(viewpoint_cam, gaussians, light_stream, calc_stream, local_axises, asg_scales, asg_axises, pipe, bg, is_train=prune_visibility)
         
+        # 获得各个高斯点云坐标、可见性、半径
         viewspace_point_tensor, visibility_filter, radii = render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
         image, shadow, other_effects = render_pkg["render"], render_pkg["shadow"], render_pkg["other_effects"]
         
@@ -214,9 +215,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
 
-            if opt_test and scene.optimizing:
-            # 只是用于优化场景光源和相机信息，因为这些信息是未知的，需要通过优化来估计
-            # 不会用于直接优化高斯模型
+            if opt_test and scene.optimizing:  
+                """这里是否有一个漏洞，当 scene.optimizing 为 false 时，测试集也会进入后续的 else 分支，但是本文中可能默认 optimizing 为 true ，阴差阳错"""
+                # 只是用于优化场景光源和相机信息，因为这些信息是未知的，需要通过优化来估计
+                # 不会用于直接优化高斯模型
                 if iteration < opt.iterations:
                     """"
                     在相机初始化时，cam_params 和 pl_params 都是 torch.nn.Parameter，默认开启了梯度计算（requires_grad=True）。
@@ -229,15 +231,32 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     优化器通过初始化时绑定的参数引用（内存地址），能够直接访问这些参数的 .grad 属性。
                     在调用 optimizer.step() 时，优化器根据计算出的梯度和设置的学习率更新参数值，实现了有效的一一对应更新。
                     """
+                    # 更新相机参数和光源参数
                     scene.optimizer.step()
+                    # 梯度清零
                     scene.optimizer.zero_grad(set_to_none = True)
-                    # do not optimize the scene
+                    # 梯度清零
                     gaussians.optimizer.zero_grad(set_to_none = True)
+
+            # 对于非测试集，即训练集进入正常阶段，进行高斯密集化，高斯修剪以及场景参数优化
             else:
-                # Densification
+                # Densification, 高斯复制或分裂
+                # 如果迭代次数小于高斯密集化迭代次数，则进行高斯密集化
                 if iteration < opt.densify_until_iter:
-                    # Keep track of max radii in image-space for pruning
+                    # 更新每个可见高斯点在2D投影上的最大半径
+                    # visibility_filter: 标记哪些点是可见的
+                    # max_radii2D: 记录每个点在屏幕空间的最大半径
+                    """
+                    Bonus:
+                        布尔索引：
+                            布尔索引是一种用于选择数组中满足特定条件的元素的索引方式。
+                            布尔索引通过一个布尔数组来选择数组中的元素，该布尔数组与原数组形状相同，其中的元素为True或False，表示是否选择该元素。
+                            布尔索引通常用于根据某些条件过滤数组中的元素，或者根据条件对数组进行操作。
+                    """
+                    # 通过布尔索引更新当前视角下，可见高斯点在2D投影上的最大半径，其布尔索引由 render_pkg 中的 visibility_filter 提供
+                    # radii：当前视角下，可见高斯点的半径（最长轴）
                     gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
+                    # 记录高斯密集化统计信息
                     gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter, image.shape[2], image.shape[1], render_pkg["out_weight"])
 
                     if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:

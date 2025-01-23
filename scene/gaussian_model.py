@@ -60,6 +60,7 @@ class GaussianModel:
         
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree  
+        # 高斯点云坐标
         self._xyz = torch.empty(0)
         self._features_dc = torch.empty(0)
         self._features_rest = torch.empty(0)
@@ -238,6 +239,8 @@ class GaussianModel:
 
         opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 
+        # 将高斯坐标、高斯特征、高斯透明度设置为可优化参数，开启梯度计算
+        # 传入 nn 前，需要将数据转换为 tensor 类型
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
         self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
@@ -684,10 +687,12 @@ class GaussianModel:
     def prune_visibility_mask(self, out_weights_acc):
         n_before = self.get_xyz.shape[0]
         n_after = self.maximum_gs
+        # 维持高斯点云数量
         n_prune = n_before - n_after
         prune_mask = torch.zeros((self.get_xyz.shape[0],), dtype=torch.bool, device=self.get_xyz.device)
         if n_prune > 0:
             # Find the mask of top n_prune smallest `self.out_weights_accum`
+            # 找到权重值最小的 n_prune 个高斯点
             _, indices = torch.topk(out_weights_acc, n_prune, largest=False)
             prune_mask[indices] = True
         return prune_mask

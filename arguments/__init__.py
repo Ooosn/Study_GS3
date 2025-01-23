@@ -89,7 +89,7 @@ class PipelineParams(ParamGroup):
         self.non_trans = 0
         self.convert_SHs_python = False
         self.compute_cov3D_python = False
-        self.debug = False
+        self.debug = True
         super().__init__(parser, "Pipeline Parameters")
 
 class OptimizationParams(ParamGroup):

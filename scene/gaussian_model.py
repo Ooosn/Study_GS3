@@ -274,8 +274,10 @@ class GaussianModel:
         self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.out_weights_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        # 
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
 
+        # 参数组
         l = [
             {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
             {'params': [self._features_dc], 'lr': training_args.feature_lr, "name": "f_dc"},
@@ -295,8 +297,13 @@ class GaussianModel:
             l.append({'params': [self.neural_material], 'lr': training_args.neural_phasefunc_lr_init, "name": "neural_material"})
             l.append({'params': self.neural_phasefunc.parameters(), 'lr': training_args.neural_phasefunc_lr_init, "name": "neural_phasefunc"})
 
-
+        # 利用 Adam 优化器优化参数组 l
+        # 不同参数学习率不同，并且有些参数需要冻结，因此 lr 设置为0，在 update_learning_rate 中更新
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
+
+        # 添加学习率调度器，用于控制起始学习率逐渐上升至最终学习率，决定 delay_rate 
+        # 其中基础学习率会指数衰减，决定 log_lerp 
+        # 最终 elay_rate * log_lerp 为当前学习率，最终会传递给 optimizer
         self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*self.spatial_lr_scale,
                                                     lr_final=training_args.position_lr_final*self.spatial_lr_scale,
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
@@ -492,31 +499,65 @@ class GaussianModel:
 
                 optimizable_tensors[group["name"]] = group["params"][0]
         return optimizable_tensors
-
+    
+    """
+    函数：通过 mask 过滤掉需要修剪的点，减少后续运算
+    返回：直接更新优化器参数组，并通过 optimizable_tensors 字典，返回所有 非通用asg 高斯点参数属性
+    """
     def _prune_optimizer(self, mask):
         optimizable_tensors = {}
+
         for group in self.optimizer.param_groups:
+            # 跳过 asg 参数组（因为他们是高斯共用的，所以不涉及修建），以及参数组数量大于1的参数组（实际上好像没有，也可能是在不是高斯点的参数部分）
             if len(group["params"]) > 1 or "asg" == group["name"][:3]:
                 continue
-            stored_state = self.optimizer.state.get(group['params'][0], None)
+            # 获取参数组状态,因为只有一个参数组，所以直接通过 group["params"][0] 获取
+            # 获取参数组状态，如果状态不存在，则返回 None，说明还没经过后向传播，不用考虑 optimizer 的更新
+            stored_state = self.optimizer.state.get(group["params"][0], None)
+            
+            # 如果状态存在，则更新状态
             if stored_state is not None:
+                # 指数移动平均，一阶动量
                 stored_state["exp_avg"] = stored_state["exp_avg"][mask]
+                # 平方指数移动平均，二阶动量
                 stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][mask]
 
+                # 当你对参数进行修剪，即 group["params"][0][mask]
+                # 优化器在之前为这个参数创建了状态，需要删除旧的状态，
+                """
+                为什么需要删除旧的状态？  
+                    1. 因为在 state 字典中，字典的 key 是参数的地址，而参数的地址在参数组中是唯一的，因此需要删除旧的状态，
+                    2. group["params"][0] = nn.Parameter((group... 这一步，group["params"][0] 的地址发生了变化，
+                    2. 因此即便后续我们通过 self.optimizer.state[group['params'][0]] = stored_state 更新状态，会添加新的键值对，
+                    3. 字典中依然会存在旧的状态，这会浪费内存，甚至有可能导致一些更严重的后果（比如说遍历状态集，或者做一些运算用到状态集）
+                """
                 del self.optimizer.state[group['params'][0]]
+                # 旧参数组链接新参数组的地址
                 group["params"][0] = nn.Parameter((group["params"][0][mask].requires_grad_(True)))
+                # 对齐/更新状态
                 self.optimizer.state[group['params'][0]] = stored_state
 
                 optimizable_tensors[group["name"]] = group["params"][0]
+
+            # 如果状态不存在，则直接初始化
+            # 优化器还没有为这个参数创建任何状态，因此不需要清理旧的状态条目
             else:
                 group["params"][0] = nn.Parameter(group["params"][0][mask].requires_grad_(True))
                 optimizable_tensors[group["name"]] = group["params"][0]
+
         return optimizable_tensors
 
+    """
+    函数：更新修剪后的高斯点参数
+    返回：无返回，直接更新 self 中的参数
+    """
     def prune_points(self, mask):
+        # mask 取反，得到需要保留的点，之前是需要修剪的为 True，现在需要保留的为 True。
         valid_points_mask = ~mask
+        # 通过 mask 过滤掉需要修剪的点，减少运算
         optimizable_tensors = self._prune_optimizer(valid_points_mask)
 
+        # 更新参数
         self._xyz = optimizable_tensors["xyz"]
         self._features_dc = optimizable_tensors["f_dc"]
         self._features_rest = optimizable_tensors["f_rest"]
@@ -530,36 +571,56 @@ class GaussianModel:
             self.local_q = optimizable_tensors["local_q"]
             self.neural_material = optimizable_tensors["neural_material"]
 
+        # 更新梯度以及权重累加器
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
         self.out_weights_accum = self.out_weights_accum[valid_points_mask]
 
+        # 更新 denom 和 max_radii2D，用于对齐后续的计算
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
 
+    """
+    函数：这个函数的作用是将新的张量（来自 tensors_dict）与优化器中的现有参数进行拼接
+         与之前那个函数不同，这个函数是拼接，而之前那个函数是完成对高斯点修建后的属性更新
+    返回：直接更新优化器参数组，并通过 optimizable_tensors 字典，返回所有拼接后的 非通用asg 高斯点参数属性
+    """
     def cat_tensors_to_optimizer(self, tensors_dict):
+        # tensors_dict 传入的新的高斯点参数，字典形式
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
+            # 依然跳过 asg 参数组
             if len(group["params"]) > 1 or "asg" == group["name"][:3]:
                 continue
             # assert len(group["params"]) == 1
+            # 
             extension_tensor = tensors_dict[group["name"]]
             stored_state = self.optimizer.state.get(group['params'][0], None)
             if stored_state is not None:
-
+                
+                # 将新的张量与优化器中的现有参数进行拼接，并更新优化器的状态
                 stored_state["exp_avg"] = torch.cat((stored_state["exp_avg"], torch.zeros_like(extension_tensor)), dim=0)
                 stored_state["exp_avg_sq"] = torch.cat((stored_state["exp_avg_sq"], torch.zeros_like(extension_tensor)), dim=0)
-
+                # 删除 state 中旧的键值对
                 del self.optimizer.state[group['params'][0]]
+                # 新的张量与旧的张量拼接，形成新地址，并重新链接 group["params"][0]
                 group["params"][0] = nn.Parameter(torch.cat((group["params"][0], extension_tensor), dim=0).requires_grad_(True))
+                # 对齐/更新状态，添加新的键值对
                 self.optimizer.state[group['params'][0]] = stored_state
 
                 optimizable_tensors[group["name"]] = group["params"][0]
+
+            # 如果状态不存在，则直接初始化，不用考虑前文中的旧状态处理，因为旧状态不存在  
             else:
                 group["params"][0] = nn.Parameter(torch.cat((group["params"][0], extension_tensor), dim=0).requires_grad_(True))
                 optimizable_tensors[group["name"]] = group["params"][0]
 
         return optimizable_tensors
 
+    """
+    函数：密集化后，修正场景中的高斯点，以及它们的属性
+         利用上一个函数，将新生成的点和之前的高斯点拼接，并更新优化器中的参数
+    返回：无返回，直接更新 self 中的参数
+    """
     def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_kd, new_ks, new_alpha_asg, local_q, new_neural_material):
         d = {"xyz": new_xyz,
         "f_dc": new_features_dc,
@@ -575,8 +636,11 @@ class GaussianModel:
                 "local_q": local_q,
                 "neural_material": new_neural_material
             })
-            
+        # 新生成的高斯点和之前的高斯点拼接，直接更新优化器参数组，
+        # 并且返回 optimizable_tensors 所有拼接后的 非通用asg 高斯点参数属性
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
+
+        # 更新类内部的属性，将最新的高斯点参数同步到类中，使它们可以被渲染或计算其他功能
         self._xyz = optimizable_tensors["xyz"]
         self._features_dc = optimizable_tensors["f_dc"]
         self._features_rest = optimizable_tensors["f_rest"]
@@ -590,14 +654,24 @@ class GaussianModel:
             self.local_q = optimizable_tensors["local_q"]
             self.neural_material = optimizable_tensors["neural_material"]
 
+        # 重置梯度以及权重累加器，用于对齐后续的计算，之前的计算已经用过修建和密集化了，所以需要重置
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.out_weights_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
+    """
+    函数：对高斯点进行密集化，并通过分裂高斯点的方式
+         - 使用 densification_postfix 函数，将新生成的点和之前的高斯点拼接，并更新优化器中的参数
+         - 使用 prune_points 函数，修剪掉不满足条件的高斯点
+    返回：用于后续的 densify_and_prune 函数，并返回布尔索引，用于标记需要的高斯点
+    """
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
+        # grads 是梯度张量，grad_threshold 是梯度阈值，scene_extent 是场景范围，N 是分裂数量
+        
+        # 获取当前高斯点数量
         n_init_points = self.get_xyz.shape[0]
-        # Extract points that satisfy the gradient condition
+        # 提取满足梯度条件的点
         padded_grad = torch.zeros((n_init_points), device="cuda")
         padded_grad[:grads.shape[0]] = grads.squeeze()
         selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
@@ -627,12 +701,18 @@ class GaussianModel:
         self.prune_points(prune_filter)
         
         return prune_filter
-
+    
+    """
+    函数：对高斯点进行密集化，并通过直接复制高斯点的方式
+         - 使用 densification_postfix 函数，将新生成的点和之前的高斯点拼接，并更新优化器中的参数
+    返回：用于后续的 densify_and_prune 函数，
+         
+    """
     def densify_and_clone(self, grads, grad_threshold, scene_extent):
-        # Extract points that satisfy the gradient condition
+        # Extract points that satisfy the gradient coendition
         selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
-                                              torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
+                                              torch.max(slf.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
         
         new_xyz = self._xyz[selected_pts_mask]
         new_features_dc = self._features_dc[selected_pts_mask]
@@ -683,16 +763,24 @@ class GaussianModel:
         self.xyz_gradient_accum[update_filter] += torch.norm(grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
         self.out_weights_accum += out_weights
-        
+    
+    """
+    函数：决定是否修建，修建哪些高斯点
+    返回：高斯点数量*bool 的张量，用于标记需要修剪的高斯点
+    """    
     def prune_visibility_mask(self, out_weights_acc):
-        n_before = self.get_xyz.shape[0]
-        n_after = self.maximum_gs
-        # 维持高斯点云数量
+        n_before = self.get_xyz.shape[0]    # 当前高斯点数量，可能由于密集化产生变化
+        n_after = self.maximum_gs   # 最大高斯点数量，由自己设置
+        # 计算修建数量
         n_prune = n_before - n_after
+        # 创建一个与高斯点数量相同的布尔掩码，用于标记需要修剪的高斯点，并确保 prune_mask 张量与 _xyz 张量在储存方式上一致
         prune_mask = torch.zeros((self.get_xyz.shape[0],), dtype=torch.bool, device=self.get_xyz.device)
+
+        # 决定是否修建
         if n_prune > 0:
             # Find the mask of top n_prune smallest `self.out_weights_accum`
             # 找到权重值最小的 n_prune 个高斯点
             _, indices = torch.topk(out_weights_acc, n_prune, largest=False)
+            # 权重值最小的 n_prune 的高斯点序号在布尔掩码张量中标记为 True，表示需要修剪
             prune_mask[indices] = True
         return prune_mask

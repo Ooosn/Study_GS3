@@ -76,7 +76,7 @@ class Scene:
 
         self.train_cameras = {}
         self.test_cameras = {}
-
+        
         # 无论是否加载已训练的模型，都需要加载场景数据集
         # 仅判断是否存在transforms_train.json文件，如果存在则认为是Blender数据集，随后在sceneLoadTypeCallbacks中调用Blender函数加载训练和测试集的相机信息
         if os.path.exists(os.path.join(args.source_path, "transforms_train.json")):

@@ -238,9 +238,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     # 梯度清零
                     gaussians.optimizer.zero_grad(set_to_none = True)
 
+            # 进入训练集：：：：：
             # 对于非测试集，即训练集进入正常阶段，进行高斯密集化，高斯修剪以及场景参数优化
             else:
-                # Densification, 高斯复制或分裂
+
+                # 第一步：：Densification, 高斯复制或分裂，when opt.density_from_iter < iteration < opt.densify_until_iter
                 # 如果迭代次数小于高斯密集化迭代次数，则进行高斯密集化
                 if iteration < opt.densify_until_iter:
                     # 更新每个可见高斯点在2D投影上的最大半径
@@ -256,17 +258,28 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     # 通过布尔索引更新当前视角下，可见高斯点在2D投影上的最大半径，其布尔索引由 render_pkg 中的 visibility_filter 提供
                     # radii：当前视角下，可见高斯点的半径（最长轴）
                     gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
+                    """
+                    # 获得各个高斯点云坐标、可见性、半径
+                    viewspace_point_tensor, visibility_filter, radii = render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+                    # 获得渲染结果
+                    image, shadow, other_effects = render_pkg["render"], render_pkg["shadow"], render_pkg["other_effects"]
+                    """
                     # 记录高斯密集化统计信息
                     gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter, image.shape[2], image.shape[1], render_pkg["out_weight"])
 
+                    # 如果迭代次数大于高斯密集化开始迭代次数，并且迭代次数是高斯密集化迭代间隔的倍数，则进行高斯密集化
                     if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+                        # size_threshold 是高斯密集化过程中，高斯点尺寸阈值
                         size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                         gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
+                        # 判断高斯点数量是否超过最大高斯点数量的95%，如果超过，则进行高斯修剪
                         if gaussians.get_xyz.shape[0] > gaussians.maximum_gs * 0.95:
                             prune_visibility = True
                     
+                    # 如果迭代次数是透明度重置迭代次数的倍数，或者在白色背景且迭代次数等于高斯密集化开始迭代次数，则进行透明度重置
                     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                         gaussians.reset_opacity()
+                # 已抵达高斯密集化迭代次数，后续不再进行高斯密集化，prune_visibility 设置为 False
                 else:
                     prune_visibility = False
 

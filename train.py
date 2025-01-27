@@ -271,6 +271,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                         # size_threshold 是高斯密集化过程中，高斯点尺寸阈值
                         size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                        # 进行高斯密集化(复制和分裂)，传入的最大梯度，最小透明度，场景范围（相机视锥），尺寸阈值
+                        # 最小透明度和尺寸阈值在这里直接调节
                         gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
                         # 判断高斯点数量是否超过最大高斯点数量的95%，如果超过，则进行高斯修剪
                         if gaussians.get_xyz.shape[0] > gaussians.maximum_gs * 0.95:

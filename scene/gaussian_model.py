@@ -8,6 +8,7 @@
 #
 # For inquiries contact  george.drettakis@inria.fr
 #
+necessary = False
 
 import torch
 import math
@@ -502,13 +503,14 @@ class GaussianModel:
     
     """
     函数：通过 mask 过滤掉需要修剪的点，减少后续运算
-    返回：直接更新优化器参数组，并通过 optimizable_tensors 字典，返回所有 非通用asg 高斯点参数属性
+    返回：直接更新参数和优化器，并通过 optimizable_tensors 字典，返回所有拼接后的 非通用asg 高斯点参数属性
+        - asg 参数组不涉及修剪，所有高斯点共享，只用考虑数值变化
     """
     def _prune_optimizer(self, mask):
         optimizable_tensors = {}
 
         for group in self.optimizer.param_groups:
-            # 跳过 asg 参数组（因为他们是高斯共用的，所以不涉及修建），以及参数组数量大于1的参数组（实际上好像没有，也可能是在不是高斯点的参数部分）
+            # 跳过 asg 参数组（因为他们是高斯共用的，所以不涉及修剪），以及参数组数量大于1的参数组（实际上好像没有，也可能是在不是高斯点的参数部分）
             if len(group["params"]) > 1 or "asg" == group["name"][:3]:
                 continue
             # 获取参数组状态,因为只有一个参数组，所以直接通过 group["params"][0] 获取
@@ -532,15 +534,15 @@ class GaussianModel:
                     3. 字典中依然会存在旧的状态，这会浪费内存，甚至有可能导致一些更严重的后果（比如说遍历状态集，或者做一些运算用到状态集）
                 """
                 del self.optimizer.state[group['params'][0]]
-                # 旧参数组链接新参数组的地址
+                # 更新参数，链接新地址
                 group["params"][0] = nn.Parameter((group["params"][0][mask].requires_grad_(True)))
-                # 对齐/更新状态
+                # 对齐/更新状态，添加键值对：新地址：新状态
                 self.optimizer.state[group['params'][0]] = stored_state
 
                 optimizable_tensors[group["name"]] = group["params"][0]
 
             # 如果状态不存在，则直接初始化
-            # 优化器还没有为这个参数创建任何状态，因此不需要清理旧的状态条目
+            # 优化器还没有为这个参数创建任何状态，因此不需要清理旧的状态条目，只需更新参数即可
             else:
                 group["params"][0] = nn.Parameter(group["params"][0][mask].requires_grad_(True))
                 optimizable_tensors[group["name"]] = group["params"][0]
@@ -549,12 +551,12 @@ class GaussianModel:
 
     """
     函数：更新修剪后的高斯点参数
-    返回：无返回，直接更新 self 中的参数
+    返回：无返回，直接更新 self 中的属性
     """
     def prune_points(self, mask):
         # mask 取反，得到需要保留的点，之前是需要修剪的为 True，现在需要保留的为 True。
         valid_points_mask = ~mask
-        # 通过 mask 过滤掉需要修剪的点，减少运算
+        # 更新优化器中的参数，返回所有拼接后的 非通用asg 高斯点参数属性
         optimizable_tensors = self._prune_optimizer(valid_points_mask)
 
         # 更新参数
@@ -571,7 +573,7 @@ class GaussianModel:
             self.local_q = optimizable_tensors["local_q"]
             self.neural_material = optimizable_tensors["neural_material"]
 
-        # 更新梯度以及权重累加器
+        # 更新2D梯度累加器以及权重累加器
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
         self.out_weights_accum = self.out_weights_accum[valid_points_mask]
 
@@ -581,8 +583,8 @@ class GaussianModel:
 
     """
     函数：这个函数的作用是将新的张量（来自 tensors_dict）与优化器中的现有参数进行拼接
-         与之前那个函数不同，这个函数是拼接，而之前那个函数是完成对高斯点修建后的属性更新
-    返回：直接更新优化器参数组，并通过 optimizable_tensors 字典，返回所有拼接后的 非通用asg 高斯点参数属性
+         与之前那个函数不同，这个函数是拼接，而之前那个函数是完成对高斯点修剪后的属性更新
+    返回：直接更新参数和优化器，并通过 optimizable_tensors 字典，返回所有拼接后的 非通用asg 高斯点参数属性
     """
     def cat_tensors_to_optimizer(self, tensors_dict):
         # tensors_dict 传入的新的高斯点参数，字典形式
@@ -592,7 +594,7 @@ class GaussianModel:
             if len(group["params"]) > 1 or "asg" == group["name"][:3]:
                 continue
             # assert len(group["params"]) == 1
-            # 
+            # 找到需要拼接的张量
             extension_tensor = tensors_dict[group["name"]]
             stored_state = self.optimizer.state.get(group['params'][0], None)
             if stored_state is not None:
@@ -600,9 +602,15 @@ class GaussianModel:
                 # 将新的张量与优化器中的现有参数进行拼接，并更新优化器的状态
                 stored_state["exp_avg"] = torch.cat((stored_state["exp_avg"], torch.zeros_like(extension_tensor)), dim=0)
                 stored_state["exp_avg_sq"] = torch.cat((stored_state["exp_avg_sq"], torch.zeros_like(extension_tensor)), dim=0)
+                """
+                torch.zeros_like(tensor)：生成和 tensor 形状、设备、数据类型一致的零张量
+                torch.cat(tensor1, tensor2, dim=0)：
+                    1. 将 tensor1 和 tensor2 沿着第一个维度拼接，维度为 (N+M, ?)
+                    2. dim=0 不定义也可以，默认从 dim=0 即第一个维度开始拼接
+                """
                 # 删除 state 中旧的键值对
                 del self.optimizer.state[group['params'][0]]
-                # 新的张量与旧的张量拼接，形成新地址，并重新链接 group["params"][0]
+                # 更新参数：新的张量与旧的张量拼接，形成新地址，并重新链接 group["params"][0]
                 group["params"][0] = nn.Parameter(torch.cat((group["params"][0], extension_tensor), dim=0).requires_grad_(True))
                 # 对齐/更新状态，添加新的键值对
                 self.optimizer.state[group['params'][0]] = stored_state
@@ -619,7 +627,7 @@ class GaussianModel:
     """
     函数：密集化后，修正场景中的高斯点，以及它们的属性
          利用上一个函数，将新生成的点和之前的高斯点拼接，并更新优化器中的参数
-    返回：无返回，直接更新 self 中的参数
+    返回：无返回，直接更新 self 中的属性
     """
     def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_kd, new_ks, new_alpha_asg, local_q, new_neural_material):
         d = {"xyz": new_xyz,
@@ -636,11 +644,11 @@ class GaussianModel:
                 "local_q": local_q,
                 "neural_material": new_neural_material
             })
-        # 新生成的高斯点和之前的高斯点拼接，直接更新优化器参数组，
+        # 新生成的高斯点和之前的高斯点拼接，直接更新参数和优化器
         # 并且返回 optimizable_tensors 所有拼接后的 非通用asg 高斯点参数属性
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
 
-        # 更新类内部的属性，将最新的高斯点参数同步到类中，使它们可以被渲染或计算其他功能
+        # 利用返回的 optimizable_tensors 更新类内部的属性
         self._xyz = optimizable_tensors["xyz"]
         self._features_dc = optimizable_tensors["f_dc"]
         self._features_rest = optimizable_tensors["f_rest"]
@@ -654,7 +662,7 @@ class GaussianModel:
             self.local_q = optimizable_tensors["local_q"]
             self.neural_material = optimizable_tensors["neural_material"]
 
-        # 重置梯度以及权重累加器，用于对齐后续的计算，之前的计算已经用过修建和密集化了，所以需要重置
+        # 重置2D梯度累加器以及权重累加器，用于对齐后续的计算，之前的计算已经用过修剪和密集化了，所以需要重置
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.out_weights_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
@@ -664,26 +672,78 @@ class GaussianModel:
     函数：对高斯点进行密集化，并通过分裂高斯点的方式
          - 使用 densification_postfix 函数，将新生成的点和之前的高斯点拼接，并更新优化器中的参数
          - 使用 prune_points 函数，修剪掉不满足条件的高斯点
-    返回：用于后续的 densify_and_prune 函数，并返回布尔索引，用于标记需要的高斯点
+    返回：用于后续的 densify_and_prune 函数，并返回包括布尔索引，其中分裂前的点为 True，其他点为 False，包括新生成/分裂后的点
     """
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
-        # grads 是梯度张量，grad_threshold 是梯度阈值，scene_extent 是场景范围，N 是分裂数量
         
-        # 获取当前高斯点数量
-        n_init_points = self.get_xyz.shape[0]
-        # 提取满足梯度条件的点
-        padded_grad = torch.zeros((n_init_points), device="cuda")
-        padded_grad[:grads.shape[0]] = grads.squeeze()
+        if necessary: 
+            # grads 是累积的2D梯度张量，grad_threshold 是2D梯度阈值，scene_extent 是场景范围，N 是分裂数量
+            # 获取当前高斯点数量
+            num_points = self.get_xyz.shape[0]
+            # 初始化一个 tensor张量 用于后续的填充
+            padded_grad = torch.zeros((num_points), device="cuda")
+            """
+            grads.squeeze()：
+            （在 tensor 向量中，二维和一维的维度是不同的，二维是 (N, 1)，一维是 (N,)）
+            1. 将 grads 张量的维度从 (N, 1) 压缩到 (N,)，即去掉维度为1的维度，变为一维张量，用于和其他一维张量进行拼接，对齐。
+            2. 只适用于 grads 张量维度为 (N, 1) 的情况，如果 grads 维度为 (N, 2)，则不变
+            """
+            padded_grad[:grads.shape[0]] = grads.squeeze() # 其实直接 grads(:,0)也可以
+            # 通过2D梯度阈值，筛选出大于2D梯度阈值的点，得到一个布尔索引
+            """
+            torch.where(condition, x, y)：
+            1. 根据 condition 条件，选择 x 或 y 的值，如果 condition 为 True，则选择 x 的值，如果 condition 为 False，则选择 y 的值
+            2. 返回一个与 condition 形状相同的张量，用于标记满足条件的点
+            """
+            selected_pts_mask = torch.where(grads.squeeze() >= grad_threshold, True, False)
+        
+        # 前文有点啰嗦，直接用 padded_grad >= grad_threshold 就行
         selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
+        """
+        torch.logical_and 是逻辑与运算，用于筛选出同时满足两个条件的点，true and true 为 true
+        torch.max(self.get_scaling, dim=1) 返回一个两个属性的对象，values 是最大值，indices 是最大值的索引
+            - dim=1 表示在第二个维度上取最大值
+        """
+        # 因为该函数是 split 分支，因此需要第二次筛选，判断是否过大
+        # percent_dense*scene_extent 代表 高斯点 的尺寸阈值
+        # torch.max(self.get_scaling, dim=1).values，得出每个高斯点在 xyz 方向上的最大缩放因子，随后和尺寸阈值进行比较
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
-
-        stds = self.get_scaling[selected_pts_mask].repeat(N,1)
-        means =torch.zeros((stds.size(0), 3),device="cuda")
+        
+        # 生成新的高斯点，计算新的高斯点属性
+        # N=2 表示生成 2 个新的高斯点
+        # 缩放因子维度为（splnum, 3），splnum 为需要分裂的高斯点数量    
+        # 以缩放因子作为标准差，以正态分布生成偏差，维度为 (splnum*N, 3)
+        stds = self.get_scaling[selected_pts_mask].repeat(N,1)   # get_scaling：torch.exp(self._scaling)
+        """
+        tensor.repeat(N,1) 将张量沿着第一个维度复制 N 次，沿着第二个维度复制 1 次  
+        """
+        means =torch.zeros((stds.size(0), 3),device="cuda")     
         samples = torch.normal(mean=means, std=stds)
+        """
+        torch.normal 是生成正态分布的函数，mean 是均值，std 是标准差
+            - torch.normal 中，mean 和 std 储存方式需要相同，维度可通过广播对齐
+        """
+        # 旋转矩阵维度为 (splnum, 3, 3)，进行复制对齐，维度为 (splnum*N, 3, 3)
+        # 本文采用的 四元数，因此需要构建旋转矩阵
         rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N,1,1)
+
+        # 1）生成新的高斯点
+        # 旋转矩阵与偏差相乘 + 分裂前高斯点中心 = 分裂后的高斯点中心
+        # unsqueeze(-1) 在最后一个维度上增加一个维度，维度为 (splnum*N, 4, 1)，用于 bmm 计算的维度对齐
+        # squeeze(-1) 删除最后一个维度，维度为 (splnum*N, 4)，和 分裂前高斯点中心维度对齐
         new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
+        """
+        torch.bmm 是 Batch Matrix Multiplication，计算批次中的每对矩阵乘法
+            - 专门用于 3D 张量，不支持高维张量，形状严格为 (batch_size, n, m) 和 (batch_size, m, p) 的张量
+        torch.unsqueeze 用于在张量的指定维度上增加一个维度，通常用于在指定位置，比如在最后一个维度上增加一个维度
+        torch.squeeze 可指定维度，默认删除所有维度为 1 的维度
+        """
+
+        # 2）生成新的高斯点属性
+        # 将缩放因子除以 0.8*N，考虑分裂适当缩小，并反激活，得到原缩放因子
         new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N,1) / (0.8*N))
+        # 剩下属性皆直接继承分裂前点的属性，旋转矩阵，基础颜色，其他效果，漫反射系数，镜面反射系数，alpha，asg系数，局部旋转矩阵，神经材质，透明度
         new_rotation = self._rotation[selected_pts_mask].repeat(N,1)
         new_features_dc = self._features_dc[selected_pts_mask].repeat(N,1,1)
         new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
@@ -694,10 +754,14 @@ class GaussianModel:
         new_neural_material = None if not self.use_MBRDF else self.get_neural_material[selected_pts_mask].repeat(N,1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
 
+        # 将新生成的高斯点与原高斯点拼接，并更新模型参数和优化器状态
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, \
             new_kd, new_ks, new_alpha_asg, new_local_q, new_neural_material)
 
+        # 删掉分裂前的点，保留分裂后的点
+        # 参数和优化器已经添加了新生成的点，所以需要再删除分裂前的点的时候，要通过拼接 N * selected_pts_mask.sum() 来对齐维度。
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
+        # 根据布尔掩码，修剪值为 True 的点
         self.prune_points(prune_filter)
         
         return prune_filter
@@ -705,15 +769,17 @@ class GaussianModel:
     """
     函数：对高斯点进行密集化，并通过直接复制高斯点的方式
          - 使用 densification_postfix 函数，将新生成的点和之前的高斯点拼接，并更新优化器中的参数
-    返回：用于后续的 densify_and_prune 函数，
+    返回：无返回，用于后续的 densify_and_prune 函数
          
     """
     def densify_and_clone(self, grads, grad_threshold, scene_extent):
         # Extract points that satisfy the gradient coendition
         selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
+        # 二次筛选，判断是否过大，这里要的是过小的，过大去分裂
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(slf.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
         
+        # 直接继承高斯点属性
         new_xyz = self._xyz[selected_pts_mask]
         new_features_dc = self._features_dc[selected_pts_mask]
         new_features_rest = self._features_rest[selected_pts_mask]
@@ -726,57 +792,103 @@ class GaussianModel:
         new_local_q = None if not self.use_MBRDF else self.local_q[selected_pts_mask]
         new_neural_material = None if not self.use_MBRDF else self.get_neural_material[selected_pts_mask]
 
+        # 将新生成的高斯点与原高斯点拼接，并更新模型参数和优化器状态（分裂中是先添加两组分裂点，然后删去原点，这里直接添加一组相同属性的点作为复制）
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, \
             new_kd, new_ks, new_alpha_asg, new_local_q, new_neural_material)
 
+    """
+    函数：真正的密集化函数与修剪函数
+         - 中间调用 densify_and_clone 和 densify_and_split 函数用于密集化
+         - 三重修剪：透明度，尺寸，权重，最终调用 prune_points 函数用于修剪
+    返回：无返回，直接更新 self 中的属性
+    """
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
+        # 计算各点归一化后的累积2D梯度，即除以各自累积的次数
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
-        
+        # 获得权重累加器
         out_weights_acc = self.out_weights_accum
 
+        # 调用 densify_and_clone 和 densify_and_split 函数
         self.densify_and_clone(grads, max_grad, extent)
         _prune_filter = self.densify_and_split(grads, max_grad, extent)
         
+        # 更新权重累加器
+        # 先复制，再分裂，在 _prune_filter 中，新加入的点都在后面，且除了需要删除的点为 True，其他点为 False
+        # ~ 是取反操作，True 变为 False，False 变为 True
+        # 新加入的点并无权重，因此首先只需考虑原本数量的点，因此用 out_weights_acc.shape[0] 来对齐维度
         out_weights_acc = out_weights_acc[~_prune_filter[:out_weights_acc.shape[0]]]
+        # 初始化 padded_out_weights 张量，即新的权重累加器张量，维度为 (self.get_xyz.shape[0],)
         padded_out_weights = torch.zeros((self.get_xyz.shape[0]), device="cuda")
-        padded_out_weights[:out_weights_acc.shape[0]] = out_weights_acc.squeeze()
+        # 将原本的权重累加器张量赋值给 padded_out_weights 张量
+        padded_out_weights[:out_weights_acc.shape[0]] = out_weights_acc.squeeze()   """ squeeze 感觉没必要，也可能是习惯吧 """
+        # 将新加入的点权重赋值给 padded_out_weights 张量，统一赋值为原本权重累加器中的最大权重
         padded_out_weights[out_weights_acc.shape[0]:] = torch.max(out_weights_acc)
 
+        # 1）透明度修剪掩码
+        # 计算透明度过低所导致的修剪掩码，将所有点的透明度与最小透明度进行比较，小于最小透明度的点为 True，否则为 False
         prune_mask = (self.get_opacity < min_opacity).squeeze()
+        
+        # 2）尺寸修剪掩码
+        # 存在一个迭代范围，如果迭代次数大于该范围，则进行尺寸阈值的筛选，之前不需要，即 max_screen_size 为 None
+        # 在 3dgs 早期阶段，模型主要用于调整高斯点位置和分布，后期趋于稳定，则需要进行尺寸的控制和剔除过大的高斯点，加速渲染
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
-            
+        
+        # 3）权重修剪掩码
         out_weights_mask = self.prune_visibility_mask(padded_out_weights)
+
+        # 混合修剪掩码，得到最终的修剪掩码
         prune_mask = torch.logical_or(prune_mask, out_weights_mask)
+        """
+        torch.logical_or 是逻辑或运算，用于筛选出满足至少一个条件的点，有 true 为 true
+        """
+        # 根据最终的修剪掩码，修剪高斯点
         self.prune_points(prune_mask)
-
+        
+        # 清空缓存
+        # 这个密集化以及修剪过程中，产生了大量中间蟑螂，因此需要清空缓存
         torch.cuda.empty_cache()
-
+    
+    """
+    函数：记录高斯密集化统计信息
+         - 用于记录训练过程中，每个高斯点的累积2D梯度，权重
+         - 并通过高斯点的可见性，减少计算量
+    """
     def add_densification_stats(self, viewspace_point_tensor, update_filter, width, height, out_weights):
+        # 这里的梯度是 2D 梯度，即每一个视角中 x,y 方向的梯度
         grad = viewspace_point_tensor.grad.squeeze(0) # [N, 2]
         # Normalize the gradient to [-1, 1] screen size
         grad[:, 0] *= width * 0.5
         grad[:, 1] *= height * 0.5
+        # 将梯度累加到累积梯度张量中，并更新累积次数，用于后续修建中的归一化
         self.xyz_gradient_accum[update_filter] += torch.norm(grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
+        """
+        denom 只用于 2D梯度 的归一化，不用于权重归一化，
+        原因：
+            - 个人认为，每个视角中，并不是所有高斯点都参与，有的视角下高斯点动荡，有的视角下反而不可见，而有些高斯点可能动荡不大，但一直可见
+            所以最终累积 2D梯度 可能一样大，显然这是不公平的，所以需要考虑高斯点参与的视角数量，除以累积次数归一化。
+            - 而 权重累加器 看中的是整体，每个高斯点对整个场景的贡献，因此不需要归一化
+        """
+        # 将权重累加到累积权重张量中
         self.out_weights_accum += out_weights
     
     """
-    函数：决定是否修建，修建哪些高斯点
-    返回：高斯点数量*bool 的张量，用于标记需要修剪的高斯点
+    函数：传入权重累加器，决定修剪哪些高斯点
+    返回：n * 1 的张量，n 为高斯点数量，1 为 bool 类型，用于标记需要修剪的高斯点
     """    
     def prune_visibility_mask(self, out_weights_acc):
         n_before = self.get_xyz.shape[0]    # 当前高斯点数量，可能由于密集化产生变化
         n_after = self.maximum_gs   # 最大高斯点数量，由自己设置
-        # 计算修建数量
+        # 计算修剪数量
         n_prune = n_before - n_after
         # 创建一个与高斯点数量相同的布尔掩码，用于标记需要修剪的高斯点，并确保 prune_mask 张量与 _xyz 张量在储存方式上一致
         prune_mask = torch.zeros((self.get_xyz.shape[0],), dtype=torch.bool, device=self.get_xyz.device)
 
-        # 决定是否修建
+        # 决定是否修剪
         if n_prune > 0:
             # Find the mask of top n_prune smallest `self.out_weights_accum`
             # 找到权重值最小的 n_prune 个高斯点

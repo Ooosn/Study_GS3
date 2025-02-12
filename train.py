@@ -149,7 +149,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # 为当前迭代选择一个视点
         viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
 
-        """！！！开始渲染"""
+        """！开始渲染"""
         # debug用，一般不需要
         if (iteration - 1) == debug_from:
             pipe.debug = True
@@ -168,7 +168,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         else:
             render_pkg = render(viewpoint_cam, gaussians, light_stream, calc_stream, local_axises, asg_scales, asg_axises, pipe, bg, is_train=prune_visibility)
         
-        # 获得各个高斯点云坐标、可见性、半径
+        # 此外，取出各个高斯点云坐标、可见性、半径，用于后续修剪
         viewspace_point_tensor, visibility_filter, radii = render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
         image, shadow, other_effects = render_pkg["render"], render_pkg["shadow"], render_pkg["other_effects"]
         
@@ -177,9 +177,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         else:
             image = image * shadow + other_effects
 
-        # Loss
+        """！！Loss部分"""
+        # 获取真实图片数据
         gt_image = viewpoint_cam.original_image.cuda()
-        
+        # 根据图片格式，进行调整
         if dataset.hdr:
             if iteration <= opt.spcular_freeze_step:
                 gt_image = torch.pow(gt_image, 1./2.2)
@@ -189,7 +190,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         else:
             image = torch.clip(image, 0.0, 1.0)
 
-        Ll1 = l1_loss(image, gt_image)
+        Ll1 = l1_loss(image, gt_image)      # lamda_dssim 默认 0.2
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
         
         # 反向传播，计算各个参数的梯度
@@ -199,7 +200,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         # torch.no_grad() 用于关闭梯度计算，加速模型的预测和推理过程
         with torch.no_grad():
-            # Progress bar
+            # Progress bar，平滑损失曲线
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             if iteration % 10 == 0:
                 progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})

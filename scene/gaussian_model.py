@@ -10,6 +10,10 @@
 #
 necessary = False
 
+
+# 高斯对象模块
+# 核心函数：densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size)
+
 import torch
 import math
 import numpy as np
@@ -645,7 +649,7 @@ class GaussianModel:
                 "neural_material": new_neural_material
             })
         # 新生成的高斯点和之前的高斯点拼接，直接更新参数和优化器
-        # 并且返回 optimizable_tensors 所有拼接后的 非通用asg 高斯点参数属性
+        # cat_tensors_to_optimizer(d) 函数拼接原高斯点和新添加的 d 高斯点，并且同时更新优化器状态，并且返回 optimizable_tensors 所有拼接后的 非通用asg 高斯点参数属性
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
 
         # 利用返回的 optimizable_tensors 更新类内部的属性
@@ -754,14 +758,15 @@ class GaussianModel:
         new_neural_material = None if not self.use_MBRDF else self.get_neural_material[selected_pts_mask].repeat(N,1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
 
-        # 将新生成的高斯点与原高斯点拼接，并更新模型参数和优化器状态
+        # 更新高斯状态，为了模块化，分为了两步，第一步就是直接拼接模块，不考虑其他删减，第二是，在通过删减模块修正场景中的高斯点
+        # 1）将新生成的高斯点与原高斯点拼接，并更新模型参数和优化器状态
+        # 此时尚未删除被分裂的点，因此还有后续一个处理
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, \
             new_kd, new_ks, new_alpha_asg, new_local_q, new_neural_material)
 
-        # 删掉分裂前的点，保留分裂后的点
+        # 2）删除分裂前的点，更新真正的参数和优化器状态
         # 参数和优化器已经添加了新生成的点，所以需要再删除分裂前的点的时候，要通过拼接 N * selected_pts_mask.sum() 来对齐维度。
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
-        # 根据布尔掩码，修剪值为 True 的点
         self.prune_points(prune_filter)
         
         return prune_filter
@@ -776,8 +781,8 @@ class GaussianModel:
         # Extract points that satisfy the gradient coendition
         selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
         # 二次筛选，判断是否过大，这里要的是过小的，过大去分裂
-        selected_pts_mask = torch.logical_and(selected_pts_mask,
-                                              torch.max(slf.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
+        selected_pts_mask = torch.logical_and(selected_pts_mask,      # percent_dense 默认0.01
+                                              torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
         
         # 直接继承高斯点属性
         new_xyz = self._xyz[selected_pts_mask]
@@ -805,8 +810,14 @@ class GaussianModel:
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
         # 计算各点归一化后的累积2D梯度，即除以各自累积的次数
         grads = self.xyz_gradient_accum / self.denom
+        # 将 grads 中 NaN 值变为 0
         grads[grads.isnan()] = 0.0
-        # 获得权重累加器
+        """
+        .isnan() 作为布尔操作，根据值是否为数字（NaN），返回一个与 grads 形状相同的布尔变量。
+        # 变量使用布尔索引 用于 给令一个变量赋值时，是作为副本
+        # 但直接，比如此处，结合布尔索引进行赋值时，是一种视图
+        """
+        # 获得权重累加器，在后续的 densify 过程中，权重会被和其他一些判断信息一起初始化，所以先拿出来，准备后面修剪使用
         out_weights_acc = self.out_weights_accum
 
         # 调用 densify_and_clone 和 densify_and_split 函数
@@ -816,12 +827,12 @@ class GaussianModel:
         # 更新权重累加器
         # 先复制，再分裂，在 _prune_filter 中，新加入的点都在后面，且除了需要删除的点为 True，其他点为 False
         # ~ 是取反操作，True 变为 False，False 变为 True
-        # 新加入的点并无权重，因此首先只需考虑原本数量的点，因此用 out_weights_acc.shape[0] 来对齐维度
+        # 通过 ~_prune_filter 保留应该留下的点的权重，但是 out_weights_acc 的维度尚未变化，所以需要先对齐
         out_weights_acc = out_weights_acc[~_prune_filter[:out_weights_acc.shape[0]]]
         # 初始化 padded_out_weights 张量，即新的权重累加器张量，维度为 (self.get_xyz.shape[0],)
         padded_out_weights = torch.zeros((self.get_xyz.shape[0]), device="cuda")
-        # 将原本的权重累加器张量赋值给 padded_out_weights 张量
-        padded_out_weights[:out_weights_acc.shape[0]] = out_weights_acc.squeeze()   """ squeeze 感觉没必要，也可能是习惯吧 """
+        # 将原本的权重累加器张量赋值给 padded_out_weights 张量，
+        padded_out_weights[:out_weights_acc.shape[0]] = out_weights_acc.squeeze()   
         # 将新加入的点权重赋值给 padded_out_weights 张量，统一赋值为原本权重累加器中的最大权重
         padded_out_weights[out_weights_acc.shape[0]:] = torch.max(out_weights_acc)
 
@@ -831,6 +842,7 @@ class GaussianModel:
         
         # 2）尺寸修剪掩码
         # 存在一个迭代范围，如果迭代次数大于该范围，则进行尺寸阈值的筛选，之前不需要，即 max_screen_size 为 None
+        # 根据高斯的最大半径以及缩放比例进行筛选，此处是默认 percent_dense 为 0.1
         # 在 3dgs 早期阶段，模型主要用于调整高斯点位置和分布，后期趋于稳定，则需要进行尺寸的控制和剔除过大的高斯点，加速渲染
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size
@@ -858,7 +870,7 @@ class GaussianModel:
          - 并通过高斯点的可见性，减少计算量
     """
     def add_densification_stats(self, viewspace_point_tensor, update_filter, width, height, out_weights):
-        # 这里的梯度是 2D 梯度，即每一个视角中 x,y 方向的梯度
+        # 这里的梯度是 2D 梯度，即每一个视角高斯球映射后的椭圆的 x,y 方向的梯度 
         grad = viewspace_point_tensor.grad.squeeze(0) # [N, 2]
         # Normalize the gradient to [-1, 1] screen size
         grad[:, 0] *= width * 0.5

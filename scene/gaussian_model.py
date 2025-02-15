@@ -228,41 +228,99 @@ class GaussianModel:
 
     # pcd: point cloud data
     def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float):
+        # lr：local radius，这里的 spatial_lr_scale，是一个半径，以相机中心为原点，计算相加距离中心的最大半径，也就是整个场景的半径
         self.spatial_lr_scale = spatial_lr_scale
+        """
+        np.array: 无论接收什么，都会创建 Numpy 数组，然后根据需要进行转换并复制数据
+        np.asarray: 对于 Numpy 数组，会直接返回，对于其他的依然也会复制数据
+        torch.tensor(): 转换格式，能转换 Python 和 Numpy 数组
+        torch.float()：转换为 torch.float32，因为直接转换数据，会尽可能维持原数据格式，因此需要利用 torch.float() 转化为 torch 默认的数据格式
+        torch.cuda()：数据移动到 GPU
+        """
+        # 初始化坐标：
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
+
+        # 初始化球谐函数：
+        # RGB2SH() 负责将 标准 RGB 颜色转换为 SH 0阶项，即高斯点的基础颜色
         fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().cuda())
+        # 创建高斯 SH 属性，fused_color.shape[0] 表示点云的数量，3 表示 RGB 颜色三通道，(self.max_sh_degree + 1) ** 2 计算当前 SH 级别所需的球谐系数总数
         features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
+        # 将 SH 0阶项 也就是基础颜色导入高斯点的颜色信息中
         features[:, :3, 0 ] = fused_color
+        # SH 的高阶项初始化为 0
         features[:, 3:, 1:] = 0.0
 
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
 
+        # 初始化尺度：
+        # 计算每个点到最近点的距离，并且保证最小值大于 0.0000001，较小的 dist2 表明 高斯点之间距离近，密度较高，因此可能需要更小的尺度
         dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001)
+        # 利用 dist2 算出每个点的尺度信息，先通过 sqrt 取平方根，再用 log 缩小/平滑尺度变化范围，随后将每个点的尺度复制为 3 维，即 xyz 初始化为同一个尺度
+        """
+        torch.repeat(1,3): 沿 dim = 1 重复三次
+        [...,None]: 等于 torch.unsqueeze(-1)
+        """
+        torch.squeeze()
         scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 3)
+
+        # 初始化旋转矩阵：
+        # 采用 4元数（quaternion） 代替旋转矩阵
+        # 所有点的四元数设置为，[1, 0, 0, 0]，表明没有旋转
+        """
+        四元数是一种表示 3D 旋转 的数学工具，定义为：q = [w, x, y, z]
+            - w 是实部，用于表示旋转角度。
+            - x, y, z 是虚部，表示旋转轴方向。
+        """
         rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
         rots[:, 0] = 1
 
+        # 初始化透明度：
+        # 生成一个 形状为 (N,1) 的张量，N 为 点云/高斯点 数量，随后乘以 0.1 ， 使所有点透明度初始化为 0.1 
+        # 不直接存储 opacity ， 而是存储 inverse_sigmoid（opacity），这样子我们将透明度从[0,1]扩展至更大的范围，拥有更大的梯度取优化参数
+        """
+        这算一个常见的 trick 了，当某个 参数 值变化范围过小，所以我们可以进行归一化，让其落入 [0,1] 区间， 当然他可能本身就是这个范围，
+        随后利用 inverse_sigmoid 将其映射到一个无界区间 (-∞, +∞)，从而增大梯度变化范围，使其在优化过程中更具可训练性 (trainability)，提高梯度更新效率。
+        """
         opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 
-        # 将高斯坐标、高斯特征、高斯透明度设置为可优化参数，开启梯度计算
-        # 传入 nn 前，需要将数据转换为 tensor 类型
-        self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
+        # 场景参数设置
+        # 将高斯坐标、高斯特征、高斯透明度设置为神经网络参数，开启梯度计算
+        """ 传入 nn 前，需要将数据转换为 tensor 类型 """
+        self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))    # 位置信息
+        # 分离 SH 0阶项（基础颜色） 和 其他 SH 高阶项（方向相关颜色）
+        
+        """
+        因为这里 RGB 三通道作为最后一个维度来计算，所以需要交换维度:
+        1. torch.transpose(dim1, dim2): 只能调整两个维度之间的顺序，适用于简单情况
+        2. torch.permute(...): 能调整多个维度之间的顺序，但需要显式指定所有维度顺序
+        两种方式都是返回视图，并不改变内存，所以为了保证计算正确时往往还需要 contiguous() 使内存连续化
+        """
         self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
         self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
+        
+        # MBRDF 相关
         if self.use_MBRDF:
+            
+            # 漫反射颜色系数
             kd = torch.ones((features.shape[0], 3), dtype=torch.float, device="cuda")*0.5
             self.kd = nn.Parameter(kd.requires_grad_(True))
+
+            # 镜面反射系数
             ks = torch.ones((features.shape[0], 3), dtype=torch.float, device="cuda")*0.5
             self.ks = nn.Parameter(ks.requires_grad_(True))
-            
+
+            # 基于 ASG (Anisotropic Spherical Gaussians)，混合多个 ASG 以逼近复杂的高光形状
             alpha_asg = torch.zeros((features.shape[0], self.basis_asg_num), dtype=torch.float, device="cuda")
             self.alpha_asg = nn.Parameter(alpha_asg.requires_grad_(True))
             self.asg_func = Mixture_of_ASG(self.basis_asg_num)
             
+            # 局部旋转四元数（法线？）
             local_rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
             local_rots[:, 0] = 1
             self.local_q = nn.Parameter(local_rots.requires_grad_(True))
             
+            # 神经材质参数/高斯点可学习的隐变量
+            # 相位函数：建立两个 MLP 分别用来优化 shadow 和 添加其他效果颜色信息
             neural_materials = torch.ones((features.shape[0], self.neural_material_size), dtype=torch.float, device="cuda")
             self.neural_material = nn.Parameter(neural_materials.requires_grad_(True))
             self.neural_phasefunc = Neural_phase(hidden_feature_size=self.hidden_feature_size, \

@@ -48,25 +48,50 @@ class SceneInfo(NamedTuple):
     nerf_normalization: dict
     ply_path: str
 
+"""
+函数：接受一组相机信息，通过相机信息计算场景的几何中心，并相机到中心的最大距离，从而用一个球包裹整个场景
+返回：场景的包围球（bounding sphere）的中心以及半径
+"""
 def getNerfppNorm(cam_info):
+
+    """
+    函数：通过相机信息，计算场景的几何中心以及包围球半径
+    返回：返回场景的几何中心以及包围球半径
+    """
     def get_center_and_diag(cam_centers):
+        # 将数组中的每个元素，都转成 np.array，然后按 horizontal stack 拼接在一起，也就是按列拼接，每一列代表一个相机中心
         cam_centers = np.hstack(cam_centers)
+        # 按列计算均值，也就是场景中心，keepdims=True 保留维度，保留之前每个数据拥有的的维度，这里是一列，其他地方也可能是一个矩阵代表一列，因为这里一列就是一个数据嘛
+        # 因为后面还要计算 欧几里得距离，需要用到一维向量的广播性质，因此保持维度
         avg_cam_center = np.mean(cam_centers, axis=1, keepdims=True)
         center = avg_cam_center
+        # 是计算 每个相机中心点到均值中心 center 的欧几里得距离 dist：distance
+        """
+        np.linalg.norm: 计算的是 欧几里得距离（L2 范数）。
+        """
         dist = np.linalg.norm(cam_centers - center, axis=0, keepdims=True)
+        # 取最大的 distance 作为半径
         diagonal = np.max(dist)
+        # 返回 center.flatten()，因为坐标向量的格式一般用一维数组表示，因此需要 flatten()
         return center.flatten(), diagonal
-
+    
     cam_centers = []
-
     for cam in cam_info:
+        # 遍历所有相机信息，获取 世界坐标系到相机坐标系的变换矩阵
+        # blender 数据可以直接获得相机的外参，也就是旋转矩阵和平移向量，现实生活的一般相机往往是没这些信息的，需要 SfM 、 SLAM 等等来标定
+        # 相机外参一般是 3*4，[R | T]，R 是旋转矩阵，T 是平移矩阵，这里就是直接获取相机的外参，将其从 3*4 扩展为 4*4 用于后续的齐次坐标计算
         W2C = getWorld2View2(cam.R, cam.T)
+        # 对世界坐标系到相机坐标系的变换矩阵求逆，即为相机坐标系到世界坐标系的变换矩阵
         C2W = np.linalg.inv(W2C)
+        # 只提取平移部分，不提取旋转部分，这里是齐次坐标系，0：4*0：4，旋转矩阵为 0：3*0：3，平移矩阵为 0：3*3：4，即最后一列前三个元素，右下角元素（最后一列第四个元素）为 1
         cam_centers.append(C2W[:3, 3:4])
 
+    # 通过每个相机的平移矩阵计算场景的几何中心以及包围球半径
     center, diagonal = get_center_and_diag(cam_centers)
+    # 为了保证包围球半径大于场景的几何中心到相机中心的最大距离，这里取 1.1 倍
     radius = diagonal * 1.1
 
+    # new_point = old_point + translate，因此translate 这里就是场景坐标系归一化的平移变换，将场景中心移动至原点
     translate = -center
 
     return {"translate": translate, "radius": radius}
@@ -144,6 +169,8 @@ def readCamerasFromTransforms(path, transformsfile, white_background, view_num, 
 
                 # get the world-to-camera transform and set R, T
                 w2c = np.linalg.inv(c2w)
+
+                # glm 默认使用列主序存储，而 NumPy（或 OpenCV）通常使用行主序。
                 R = np.transpose(w2c[:3,:3])  # R is stored transposed due to 'glm' in CUDA code
                 T = w2c[:3, 3]
 

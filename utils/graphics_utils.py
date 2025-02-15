@@ -35,6 +35,11 @@ def getWorld2View(R, t):
     Rt[3, 3] = 1.0
     return np.float32(Rt)
 
+"""
+函数：接受相机外参矩阵，[R | T]， 这里的R，T 虽然是基于 W2C 的，但是由于 cuda 中的 glm 库采用列主序 ，旋转矩阵取了转置，这里需要转置恢复
+     - 此外，此函数接受 利用 translate 和 scale 对 R，T 进行归一化，先获得 C2W，然后提取平移矩阵进行归一化计算，再转回 W2C
+返回：齐次坐标系下的 W2C 矩阵
+"""
 def getWorld2View2(R, t, translate=np.array([.0, .0, .0]), scale=1.0):
     Rt = np.zeros((4, 4))
     Rt[:3, :3] = R.transpose()

@@ -12,12 +12,13 @@ import tinycudann as tcnn
 - tcnn.Loss（损失函数）
 - tcnn.Linear（高效的全连接层）
 
-tcnn 默认没有 bias
-otype 模型类型
+    tcnn 默认没有 bias
+    otype 模型类型
 
 
 """
 # Neural_phase 继承了 torch.nn.Module，成为一个 PyTorch 的可训练模型
+# 两要素：1. __init__ 构造神经网络，2. forward 函数，用于定义前向传播
 class Neural_phase(nn.Module):
     def __init__(self, hidden_feature_size=32, hidden_feature_layers=3, frequency=4, neural_material_size=6):
         super().__init__()
@@ -71,6 +72,9 @@ class Neural_phase(nn.Module):
             if isinstance(m, nn.Linear):
                 nn.init.constant_(m.weight.data, 0.0)
 
+    """
+    通过设置 requires_grad 来设置冻结和解冻，不会自动初始化 grad 为 0 ， 仍会保留之前的梯度！
+    """
     def freeze(self):
         for name, param in self.shadow_func.named_parameters():
             param.requires_grad = False
@@ -94,10 +98,23 @@ class Neural_phase(nn.Module):
         # hint：原阴影值，decay：修正阴影值
         # other_effects，RGB 颜色修正（用于考虑其他效果带来的影响）
         """
-        torch.concat:
+        1. torch.concat = torch.cat
+            dim = -1 : 按最后一个维度拼接，如果是二维，dim = 0，也就是按行扩展，dim = 1，也就是 dim = -1 就是按列扩展
         """
+        # 所以这里扩展后，每行对应各个高斯点，如果是其他模型，对应也就是 batch 中每个数据，每列对应每个高斯点的特征向量，这里拼接了 光源方向，高斯点中心，高斯点可学习的隐变量
         other_effects = self.other_effects_func(torch.concat([wo_enc, pos_enc, neural_material], dim=-1)) * 2.0  #用于后面变为 [-1，1] 的颜色范围
+        """
+        1. torch.isnan(tensor): 返回一个 布尔张量，其中 True 表示该位置的值是 NaN
+        2. any(): 检查张量中是否 至少有一个 True：如果 tensor 中至少有一个 True，返回 True
+        3. assert：assert 语句用于 程序的调试和检查，如果条件为 False，程序会抛出 AssertionError 并终止运行。
+        4. 任何数和 NaN 进行数学运算，结果仍然是 NaN，最终可能污染输出，loss，梯度，以至于其他参数
+        """
+        # 当 other_effects 有 NaN 值，会返回包含 True 值的张量，随后在 any() 函数下返回 True，经过 not 变为 False，最终由于 assert False ， 抛出 AssertionError 异常，终止运行。
         assert not torch.isnan(other_effects).any()
         decay = self.shadow_func(torch.concat([wi_enc, pos_enc, neural_material, hint], dim=-1))
-        # torch.relu(decay - 1e-5) 如果 decay 过小，小于 1e-5，则设置为 0。这里应该除了为了减少计算开销，同时因为用的 leaky_relu 最后结果可能为负，所以需要用 relu 修正
+        """
+        torch.relu(tensor) 对张量进行逐元素 relu 操作（也就是再次经过 relu 激活函数），大于 0 的值维持原值，小于 0 的值取 0
+        """
+        # torch.relu(decay - 1e-5) 如果 decay 过小，小于 1e-5，则设置为 0（因为相减后会为负）。
+        # 这里应该除了为了减少计算开销，同时因为用的 leaky_relu 最后结果可能为负，所以需要用 relu 修正
         return torch.relu(decay - 1e-5), other_effects

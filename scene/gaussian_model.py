@@ -312,7 +312,7 @@ class GaussianModel:
             # 基于 ASG (Anisotropic Spherical Gaussians)，混合多个 ASG 以逼近复杂的高光形状
             alpha_asg = torch.zeros((features.shape[0], self.basis_asg_num), dtype=torch.float, device="cuda")
             self.alpha_asg = nn.Parameter(alpha_asg.requires_grad_(True))
-            self.asg_func = Mixture_of_ASG(self.basis_asg_num)
+            self.asg_func = Mixture_of_ASG(self.basis_asg_num)  # forward(self, wi, wo, alpha_asg, asg_scales, asg_axises):
             
             # 局部旋转四元数（法线？）
             local_rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")

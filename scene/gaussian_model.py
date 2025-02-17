@@ -279,7 +279,7 @@ class GaussianModel:
         # 不直接存储 opacity ， 而是存储 inverse_sigmoid（opacity），这样子我们将透明度从[0,1]扩展至更大的范围，拥有更大的梯度取优化参数
         """
         这算一个常见的 trick 了，当某个 参数 值变化范围过小，所以我们可以进行归一化，让其落入 [0,1] 区间， 当然他可能本身就是这个范围，
-        随后利用 inverse_sigmoid 将其映射到一个无界区间 (-∞, +∞)，从而增大梯度变化范围，使其在优化过程中更具可训练性 (trainability)，提高梯度更新效率。
+        随后利用 inverse_sigmoid 将其映射到一个更大的区间，从而增大梯度变化范围，使其在优化过程中更具可训练性 (trainability)，提高梯度更新效率。
         """
         opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 
@@ -287,8 +287,8 @@ class GaussianModel:
         # 将高斯坐标、高斯特征、高斯透明度设置为神经网络参数，开启梯度计算
         """ 传入 nn 前，需要将数据转换为 tensor 类型 """
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))    # 位置信息
-        # 分离 SH 0阶项（基础颜色） 和 其他 SH 高阶项（方向相关颜色）
-        
+
+        # 分离 SH 0阶项（Direct Component） 和 其他 SH 高阶项（方向相关颜色） 
         """
         因为这里 RGB 三通道作为最后一个维度来计算，所以需要交换维度:
         1. torch.transpose(dim1, dim2): 只能调整两个维度之间的顺序，适用于简单情况
@@ -334,13 +334,14 @@ class GaussianModel:
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
     def training_setup(self, training_args):
+
+        # 修建参数初始化
         self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.out_weights_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        # 
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
 
-        # 参数组
+        # 设置参数组
         l = [
             {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
             {'params': [self._features_dc], 'lr': training_args.feature_lr, "name": "f_dc"},
@@ -361,7 +362,7 @@ class GaussianModel:
             l.append({'params': self.neural_phasefunc.parameters(), 'lr': training_args.neural_phasefunc_lr_init, "name": "neural_phasefunc"})
 
         # 利用 Adam 优化器优化参数组 l
-        # 不同参数学习率不同，并且有些参数需要冻结，因此 lr 设置为0，在 update_learning_rate 中更新
+        # 不同参数学习率不同，并且有些参数可能未设置学习率，因此 lr 设置为0，在 update_learning_rate 中更新
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
 
         # 添加学习率调度器，用于控制起始学习率逐渐上升至最终学习率，决定 delay_rate 
@@ -387,7 +388,7 @@ class GaussianModel:
                                                     lr_delay_mult=training_args.neural_phasefunc_lr_delay_mult,
                                                     max_steps=training_args.neural_phasefunc_lr_max_steps)
 
-
+    # 根据当前迭代次数调整学习率
     def update_learning_rate(self, iteration, asg_freeze_step=0, local_q_freeze_step=0, freeze_phasefunc_steps=0):
         ''' Learning rate scheduling per step '''
         for param_group in self.optimizer.param_groups:
@@ -404,19 +405,22 @@ class GaussianModel:
                 lr = self.neural_phasefunc_scheduler_args(max(0, iteration - freeze_phasefunc_steps))
                 param_group['lr'] = lr
 
-
+    # 创建了一个 属性索引列表，用于下文的 ply 读取和存储 ———— ！！！因此要求这里的顺序和后面存储时的数据组合顺序要一致
     def construct_list_of_attributes(self):
         l = ['x', 'y', 'z', 'nx', 'ny', 'nz']
-        # All channels except the 3 DC
+
         for i in range(self._features_dc.shape[1]*self._features_dc.shape[2]):
             l.append('f_dc_{}'.format(i))
         for i in range(self._features_rest.shape[1]*self._features_rest.shape[2]):
             l.append('f_rest_{}'.format(i))
+
         l.append('opacity')
+
         for i in range(self._scaling.shape[1]):
             l.append('scale_{}'.format(i))
         for i in range(self._rotation.shape[1]):
             l.append('rot_{}'.format(i))
+
         if self.use_MBRDF:
             for i in range(self.kd.shape[1]):
                 l.append('kd_{}'.format(i))
@@ -431,11 +435,31 @@ class GaussianModel:
 
         return l
 
+    # 以 点云形式 储存场景中的高斯点信息
     def save_ply(self, path):
+
+        """
+        "/home/user/project/file.py"
+        1. os.path.dirname(path) 只会 返回路径部分，不会包含文件名
+            - '/home/user/project'
+		2. os.path.basename(path) 才是 获取文件名
+            - 'file.py'
+        3. os.path.splitext(path) 返回值：一个元组 (filename, extension)
+            - ('/home/user/project/file', '.py')
+        4. os.path.splitext(os.path.basename(path)) 拆分文件名和扩展名
+            - ('file', '.py')
+        """
         mkdir_p(os.path.dirname(path))
 
+        # 从 tensor 中导出数据:
+        # detach() 创建一个新的 tensor，但不包含计算图信息，如果 grad 为 true 的 tensro 直接 .cpu().numpy()，会报错
+        """
+        .detach() 不共享数据
+        .cpu() 共享数据
+        .numpy() 不共享数据
+        """
         xyz = self._xyz.detach().cpu().numpy()
-        normals = np.zeros_like(xyz)
+        normals = np.zeros_like(xyz)    # 占位，对齐 'nx', 'ny', 'nz' 部分，本项目其实并没有直接用到法线
         f_dc = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
         f_rest = self._features_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
         opacities = self._opacity.detach().cpu().numpy()
@@ -448,18 +472,43 @@ class GaussianModel:
             local_q = self.local_q.detach().cpu().numpy()
             neural_material = self.neural_material.detach().cpu().numpy()
 
+        # dtype_full 生成了一个 NumPy 结构化数据类型 (dtype)，其中每个字段都是 float32 ('f4')
         dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
 
+        # xyz.shape[0] 是 点的数量（即 N 个点），dtype=dtype_full 指定了 每个点的数据结构
+        # elements: N个元素，每个元素是 dtype_full 数据结构
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
+
+        # 根据是否使用mbdrf，组合不同的数据，！！！与 construct_list_of_attributes(self) 函数中的存储顺序一致：
         if self.use_MBRDF:
+            """
+            np.concatenate: 将数据组合按 axis 拼接
+            """
             attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation, \
                                         kd, ks, alpha_asg, local_q, neural_material), axis=1)
         else:
             attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
+
+        # 创建 ply 数据:
+        # map(tuple, attributes) 返回一个迭代器，它会 逐行 把 attributes 的数据转换为 tuple 。
+        """
+        map(tuple, attributes): [tuple(row) for row in attributes]
+        """ 
+		# list(...) 把这个迭代器展开成一个 Python 列表，使其可以被 elements[:] 正确赋值
+        # elements[i] 需要和 dtype_full 结构匹配，因此 attributes[i]/attributes每一行 的元素个数以及顺序必须 完全等于 dtype_full 里定义的字段数量
+        # Numpy 自定义数据结构赋值要求使用 tuple ，这样 NumPy 才能正确解析数据格式
         elements[:] = list(map(tuple, attributes))
-        el = PlyElement.describe(elements, 'vertex')
+        el = PlyElement.describe(elements, 'vertex') 
+        # 写入:
         PlyData([el]).write(path)
 
+    # 将透明度过大的点重置透明度为一个合适的值，保证所有点都能得到训练，而不是出现类似神经元的 高斯死亡。
+    """
+    比如 opacity ≈ 0.999：
+	    - self._opacity = inverse_sigmoid(0.0001) ≈ 6.9
+		- sigmoid'(6.9) ≈ 0.00099
+		- 梯度变得极小，几乎无法更新
+    """
     def reset_opacity(self):
         opacities_new = inverse_sigmoid(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
@@ -546,6 +595,10 @@ class GaussianModel:
 
         self.active_sh_degree = self.max_sh_degree
 
+    """
+    函数：因为有时会改动一些 训练过程中的参数，因此需要重新 nn.Parameter 对象 并更新优化器使数据对齐
+    返回：改动后的参数字典
+    """
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:

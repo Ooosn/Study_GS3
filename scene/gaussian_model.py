@@ -435,7 +435,7 @@ class GaussianModel:
 
         return l
 
-    # 以 点云形式 储存场景中的高斯点信息
+    # 以 点云形式 储存场景中的高斯点 可训练参数
     def save_ply(self, path):
 
         """
@@ -514,6 +514,14 @@ class GaussianModel:
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]
 
+    """
+    函数：
+        加载已存在的 ply 文件，加载 可训练参数
+        plydata.elements[0]: 是 一个 PlyElement 对象，通常表示 “vertex” 这一部分，也就是存储点云数据的部分。
+        plydata.elements[0]["x"] 这样访问时，表示获取 所有点的 x 坐标数据（Numpy 数组）。
+    返回：
+        无返回，加载储存的数据，并以 self 的形式储存，
+    """
     def load_ply(self, path):
         plydata = PlyData.read(path)
 
@@ -593,11 +601,12 @@ class GaussianModel:
         self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
 
+        # 建立 Gaussian 实例时决定，所以如果是中途保存的 ply，max_sh_degree 可能还需要额外记忆，其实应该也保存的，但这里没有考虑，可能训练比较快吧
         self.active_sh_degree = self.max_sh_degree
 
     """
-    函数：因为有时会改动一些 训练过程中的参数，因此需要重新 nn.Parameter 对象 并更新优化器使数据对齐
-    返回：改动后的参数字典
+    函数: 因为有时会改动一些 训练过程中的参数，因此需要重新 nn.Parameter 对象 并更新优化器使数据对齐
+    返回: optimizable_tensors (dict): 更新后的参数字典，键为参数名称，值为新的 nn.Parameter
     """
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}

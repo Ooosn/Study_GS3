@@ -333,6 +333,10 @@ class GaussianModel:
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
+    """
+    函数：
+        根据传入的 args 初始化可学习参数以及训练中要用到的参数
+    """
     def training_setup(self, training_args):
 
         # 修建参数初始化
@@ -504,9 +508,9 @@ class GaussianModel:
 
     # 将透明度过大的点重置透明度为一个合适的值，保证所有点都能得到训练，而不是出现类似神经元的 高斯死亡。
     """
-    比如 opacity ≈ 0.999：
-	    - self._opacity = inverse_sigmoid(0.0001) ≈ 6.9
-		- sigmoid'(6.9) ≈ 0.00099
+    比如 opacity ≈ 0.0001：
+	    - self._opacity = inverse_sigmoid(0.001) ≈ -9.2
+		- sigmoid'(-9.2) ≈ 0.000099
 		- 梯度变得极小，几乎无法更新
     """
     def reset_opacity(self):
@@ -602,6 +606,8 @@ class GaussianModel:
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
 
         # 建立 Gaussian 实例时决定，所以如果是中途保存的 ply，max_sh_degree 可能还需要额外记忆，其实应该也保存的，但这里没有考虑，可能训练比较快吧
+        # 或者是 直接默认已启动最高阶的 SH 基函数，但是我就怕这个暂时还没保存，也许这个ply文件一定是训练后才保存的
+        # 如果是训练后才保存的，就说的通了，因为渲染阶段，还需要 active_sh_degree 来选择需要的常数进行计算
         self.active_sh_degree = self.max_sh_degree
 
     """

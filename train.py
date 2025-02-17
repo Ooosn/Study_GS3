@@ -36,19 +36,27 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     # 准备输出和日志记录器，更新模型路径
     tb_writer = prepare_output_and_logger(dataset)
 
-    # 建立高斯对象，场景对象
+    # 初始化高斯实例
     gaussians = GaussianModel(dataset.sh_degree, use_MBRDF=dataset.use_nerual_phasefunc, basis_asg_num=dataset.basis_asg_num, \
                             hidden_feature_size=dataset.phasefunc_hidden_size, hidden_feature_layer=dataset.phasefunc_hidden_layers, \
                             phase_frequency=dataset.phasefunc_frequency, neural_material_size=dataset.neural_material_size,
                             maximum_gs=dataset.maximum_gs)
 
+    # 根据 训练args，优化args 以及 初始高斯 建立场景实例，最终的高斯实例
+    """
+        1. 加载场景数据集，无论是否加载旧模型都需要
+            对于非加载旧模型，则为重新训练，需要创建新的模型文件夹，并将点云文件拷贝到新建的模型文件夹下，准备训练集的相机信息，将相机信息写入到 cameras.json 文件中
+            而对于加载旧模型，该相机信息已经存在，所以不需要再次创建
+        2. 加载高斯模型，如果加载旧模型则直接从点云中加载高斯模型，否则从场景信息的点云信息中创建高斯模型
+        3. 根据命令行参数判断是否需要添加优化相机参数和光源参数
+    """
     scene = Scene(dataset, gaussians, opt=opt, shuffle=True)
     
-    # 初始化模型的训练设置
+    # 初始化参数设置
     gaussians.training_setup(opt)
 
-    # 如果提供了检查点路径，则加载模型和训练状态
-    # 检查点通常包含模型参数和训练迭代次数
+    # 如果提供了检查点路径，则加载检查点的高斯参数
+    # 如果为 True ，会覆盖上面的  gaussians.training_setup(opt) 
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
@@ -274,15 +282,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                         # 进行高斯密集化(复制和分裂)，传入的最大梯度，最小透明度，场景范围（相机视锥），尺寸阈值
                         # 最小透明度和尺寸阈值在这里直接调节
+                        # 共涉及 高斯密集化，透明度修剪，尺寸修剪，权重修剪，四种对高斯点的修改
                         gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
-                        # 判断高斯点数量是否超过最大高斯点数量的95%，如果超过，则进行高斯修剪
+                        # 判断高斯点数量是否超过最大高斯点数量的95%，如果超过，则进行高斯修剪，剔除掉不可见的点
                         if gaussians.get_xyz.shape[0] > gaussians.maximum_gs * 0.95:
                             prune_visibility = True
                     
                     # 如果迭代次数是透明度重置迭代次数的倍数，或者在白色背景且迭代次数等于高斯密集化开始迭代次数，则进行透明度重置
                     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                         gaussians.reset_opacity()
-                # 已抵达高斯密集化迭代次数，后续不再进行高斯密集化，prune_visibility 设置为 False
+
+                # 已完成高斯密集化阶段，后续不再进行高斯密集化，高斯点不会发生变多的情况，因此 prune_visibility 设置为 False
                 else:
                     prune_visibility = False
 

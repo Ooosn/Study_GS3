@@ -168,7 +168,7 @@ def render(viewpoint_camera,
                 # 归一化视角方向
                 wo = _safe_normalize(viewpoint_camera.camera_center - gau.get_xyz) # (K, 3)
 
-                     local_z = local_axises[:, :, 2] # (K, 3)
+                   local_z = local_axises[:, :, 2] # (K, 3)
                 # transfer to local axis
                 wi_local = torch.einsum('Ki,Kij->Kj', wi, local_axises) # (K, 3)
                 wo_local = torch.einsum('Ki,Kij->Kj', wo, local_axises) # (K, 3)

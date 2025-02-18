@@ -75,6 +75,8 @@ class Camera(nn.Module):
         self.camera_center = self.world_view_transform.inverse()[3, :3]
     
     # update opt cam and light
+    # 根据 cam_pose_adj 可训练参数 优化相机外参
+
     def update(self, mode = "SO3xR3"):
         cam_opt_mat = None
         if mode == "SO3xR3":
@@ -83,6 +85,10 @@ class Camera(nn.Module):
             cam_opt_mat = exp_map_SE3(self.cam_pose_adj)
         
         if cam_opt_mat is not None:
+            """
+            dR 是 cam_pose_adj 中的旋转矩阵，因此和 R_cu 相乘 产生新的旋转矩阵
+            同理，T 是平移矩阵，他要先和 dR 相乘，进行旋转，再与 dT 相加
+            """
             dR = cam_opt_mat[0, :3, :3]
             dt = cam_opt_mat[0, :3, 3:]
             R = self.R_cu.matmul(dR.T)

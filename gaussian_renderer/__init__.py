@@ -23,7 +23,7 @@ from utils.sh_utils import eval_sh
 from utils.graphics_utils import getProjectionMatrix, look_at
 
 def render(viewpoint_camera, 
-           pc : GaussianModel, 
+           gau : GaussianModel, 
            light_stream, 
            calc_stream, 
            local_axises, 
@@ -41,30 +41,53 @@ def render(viewpoint_camera,
     
     Background tensor (bg_color) must be on GPU!
     """
+    # 计算光栅化参数:
+    # 计算相机的原始焦距:
     # Set up rasterization configuration
     tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
     tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
-
     # calculate the fov and projmatrix of light
     fx_origin = viewpoint_camera.image_width / (2. * tanfovx)
     fy_origin = viewpoint_camera.image_height / (2. * tanfovy)
 
-    # calculate the fov for shadow splatting
+    # calculate the fov for shadow splatting:
+    # 计算光源和相机的距离比 f_scale_ratio
     light_position = viewpoint_camera.pl_pos[0].detach().cpu().numpy()
     camera_position = viewpoint_camera.camera_center.detach().cpu().numpy()
     f_scale_ratio = np.sqrt(np.sum(light_position * light_position) / np.sum(camera_position * camera_position))
     
+    # 计算光源的焦距
+    """
+    1. 因为这里将光源作为一个相机，因此使用相机的 焦距
+    2. 焦距随着距离成比例缩放
+    3. 因此通过计算光源和相机的距离比，来缩放光源的 焦距
+    """
     fx_far = fx_origin * f_scale_ratio
     fy_far = fy_origin * f_scale_ratio
     
+    # 计算光源的视场角，即 FoV
+    """
+    相机的视锥体（View Frustum）决定了相机可以看到的空间范围：
+        - 相机的视锥体是一个四棱锥：
+            - 顶点 是相机的光心。
+            - 成像平面（传感器 / near 平面），它始终与图像长宽一致，是固定的
+            - 远平面 (far 平面)：透视扩展出来的“虚拟底”，它的大小不是固定的，而是透视投影的结果。
+            - 图形学中，far 平面的距离可以受到人为规定，对场景进行裁剪，因此根据 fov 最后得到 far 平面的大小
+            - 高 是焦距 f（光心到成像平面的距离），即定义了 near 平面。
+        - 因此呈现出焦距大，范围小，焦距小，范围大
+        - 焦距 和 FoV 是视野大小的不同表达方式，一个用距离，一个用角度，在确定 fov 形式（水平、垂直、对角）的情况下可以互相换算
+    """
+    # 先计算 FoV 对应的正切值，然后通过 arctan 得出 FoV
     tanfovx_far = 0.5 * viewpoint_camera.image_width / fx_far
     tanfovy_far = 0.5 * viewpoint_camera.image_height / fy_far
-
     fovx_far = 2 * math.atan(tanfovx_far)
     fovy_far = 2 * math.atan(tanfovy_far)
 
-    # calculate the project matrix of shadow splatting
-    object_center=pc.get_xyz.mean(dim=0).detach()
+
+    # 光源方向的高斯泼溅: 
+    # 用于计算 shadow （shadow splatting）
+    # 计算 世界坐标系 到 光源坐标系 的变换矩阵
+    object_center=gau.get_xyz.mean(dim=0).detach()
     world_view_transform_light=look_at(light_position,
                                        object_center.detach().cpu().numpy(),
                                        up_dir=np.array([0, 0, 1]))
@@ -72,6 +95,7 @@ def render(viewpoint_camera,
                                             device=viewpoint_camera.world_view_transform.device,
                                             dtype=viewpoint_camera.world_view_transform.dtype)
     light_prjection_matric = getProjectionMatrix(znear=viewpoint_camera.znear, zfar=viewpoint_camera.zfar, fovX=fovx_far, fovY=fovy_far).transpose(0,1).cuda()
+    # 计算 MVP 矩阵，M2W变换矩阵*W2C变换矩阵*投影矩阵 （这里 高斯点本来就在世界坐标中，所以 M 可以忽略）
     full_proj_transform_light = (world_view_transform_light.unsqueeze(0).bmm(light_prjection_matric.unsqueeze(0))).squeeze(0)
     
     raster_settings_light = GaussianRasterizationSettings_light(
@@ -83,18 +107,18 @@ def render(viewpoint_camera,
         scale_modifier = scaling_modifier,
         viewmatrix = world_view_transform_light,
         projmatrix = full_proj_transform_light,
-        sh_degree = pc.active_sh_degree,
+        sh_degree = gau.active_sh_degree,
         campos = viewpoint_camera.pl_pos[0],
         prefiltered = False,
         debug = pipe.debug,
     )
     
     # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
-    screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=False, device="cuda") + 0
+    screenspace_points = torch.zeros_like(gau.get_xyz, dtype=gau.get_xyz.dtype, requires_grad=False, device="cuda") + 0
 
-    means3D = pc.get_xyz
+    means3D = gau.get_xyz
     means2D = screenspace_points
-    opacity = pc.get_opacity
+    opacity = gau.get_opacity
 
     # If precomputed 3d covariance is provided, use it. If not, then it will be computed from
     # scaling / rotation by the rasterizer.
@@ -102,17 +126,17 @@ def render(viewpoint_camera,
     rotations = None
     cov3D_precomp = None
     if pipe.compute_cov3D_python:
-        cov3D_precomp = pc.get_covariance(scaling_modifier)
+        cov3D_precomp = gau.get_covariance(scaling_modifier)
     else:
-        scales = pc.get_scaling
-        rotations = pc.get_rotation
+        scales = gau.get_scaling
+        rotations = gau.get_rotation
 
     # shadow splatting
     light_stream.wait_stream(torch.cuda.current_stream())
     with torch.no_grad():
         with torch.cuda.stream(light_stream):
             rasterizer_light = GaussianRasterizer_light(raster_settings=raster_settings_light)
-            opcacity_light = torch.zeros(scales.shape[0], dtype=torch.float32, device=scales.device)
+            opacity_light = torch.zeros(scales.shape[0], dtype=torch.float32, device=scales.device)
             _, out_weight, _, shadow = rasterizer_light(
                 means3D = means3D,
                 means2D = means2D,
@@ -122,7 +146,7 @@ def render(viewpoint_camera,
                 scales = scales,
                 rotations = rotations,
                 cov3D_precomp = cov3D_precomp,
-                non_trans = opcacity_light,
+                non_trans = opacity_light,
                 offset = 0.015,
                 thres = 4,
                 is_train = is_train)
@@ -132,24 +156,26 @@ def render(viewpoint_camera,
     shs = None
     colors_precomp = None
     if override_color is None:
-        if pc.use_MBRDF:
+        if gau.use_MBRDF:
             with torch.cuda.stream(calc_stream):
                 assert viewpoint_camera.pl_pos.shape[0] == 1
                 # calculate view and light dirs
-                pl_pos_expand = viewpoint_camera.pl_pos.expand(pc.get_xyz.shape[0], -1) # (K, 3)
-                wi_ray = pl_pos_expand - pc.get_xyz # (K, 3)
+                pl_pos_expand = viewpoint_camera.pl_pos.expand(gau.get_xyz.shape[0], -1) # (K, 3)
+                wi_ray = pl_pos_expand - gau.get_xyz # (K, 3)
+                # 归一化光源方向，可以直接 torch.nn.functional.normalize()，但是 dist_2_inv 后续也要用到，所以采用了这种方式
                 dist_2_inv = 1.0 / torch.sum(wi_ray**2, dim=-1, keepdim=True)
                 wi = wi_ray * torch.sqrt(dist_2_inv) # (K, 3)
-                wo = _safe_normalize(viewpoint_camera.camera_center - pc.get_xyz) # (K, 3)
+                # 归一化视角方向
+                wo = _safe_normalize(viewpoint_camera.camera_center - gau.get_xyz) # (K, 3)
 
-                local_z = local_axises[:, :, 2] # (K, 3)
+                     local_z = local_axises[:, :, 2] # (K, 3)
                 # transfer to local axis
                 wi_local = torch.einsum('Ki,Kij->Kj', wi, local_axises) # (K, 3)
                 wo_local = torch.einsum('Ki,Kij->Kj', wo, local_axises) # (K, 3)
-                # shading function
+                # shading functions
                 cosTheta = _NdotWi(local_z, wi, torch.nn.ELU(alpha=0.01), 0.01)
-                diffuse = pc.get_kd / math.pi
-                specular = pc.get_ks * pc.asg_func(wi_local, wo_local, pc.get_alpha_asg, asg_scales, asg_axises) # (K, 3)
+                diffuse = gau.get_kd / math.pi
+                specular = gau.get_ks * gau.asg_func(wi_local, wo_local, gau.get_alpha_asg, asg_scales, asg_axises) # (K, 3)
             
                 if fix_labert:
                     colors_precomp = diffuse
@@ -163,22 +189,23 @@ def render(viewpoint_camera,
             torch.cuda.current_stream().wait_stream(calc_stream)
             
             # shaodow splat values
-            opcacity_light = torch.clamp_min(opcacity_light, 1e-6)
-            shadow = shadow / opcacity_light # (K,)
+            opacity_light = torch.clamp_min(opacity_light, 1e-6)    # 防止最小值为0，产生 NaN
+            shadow = shadow / opacity_light # (K,)
             assert not torch.isnan(shadow).any()
             
+            # 神经网络优化 shadow 和 其他效果
             # neural components
-            decay, other_effects = pc.neural_phasefunc(wi, wo, pc.get_xyz, pc.get_neural_material, shadow.unsqueeze(-1)) # (K, 1), (K, 3)
+            decay, other_effects = gau.neural_phasefunc(wi, wo, gau.get_xyz, gau.get_neural_material, shadow.unsqueeze(-1)) # (K, 1), (K, 3)
             
             colors_precomp = torch.concat([colors_precomp * inten_scale, decay, other_effects * dist_2_inv * inten_scale], dim=-1) # (K, 7)
         elif pipe.convert_SHs_python:
-            shs_view = pc.get_features.transpose(1, 2).view(-1, 3, (pc.max_sh_degree+1)**2)
-            dir_pp = (pc.get_xyz - viewpoint_camera.camera_center.repeat(pc.get_features.shape[0], 1))
+            shs_view = gau.get_features.transpose(1, 2).view(-1, 3, (gau.max_sh_degree+1)**2)
+            dir_pp = (gau.get_xyz - viewpoint_camera.camera_center.repeat(gau.get_features.shape[0], 1))
             dir_pp_normalized = dir_pp/dir_pp.norm(dim=1, keepdim=True)
-            sh2rgb = eval_sh(pc.active_sh_degree, shs_view, dir_pp_normalized)
+            sh2rgb = eval_sh(gau.active_sh_degree, shs_view, dir_pp_normalized)
             colors_precomp = torch.clamp_min(sh2rgb + 0.5, 0.0)
         else:
-            shs = pc.get_features
+            shs = gau.get_features
     else:
         colors_precomp = override_color
     torch.cuda.synchronize()

@@ -65,7 +65,21 @@ def getWorld2View2_cu(R, t, translate=torch.tensor([.0, .0, .0]), scale=1.0):
     Rt = torch.linalg.inv(C2W_translated)
     return Rt
 
+"""
+函数：
+    投影变化的第一步，准备透视投影 ———— 把 3D 坐标转换成 4D 齐次坐标 
+返回：
+    投影矩阵（注意和数学中 投影矩阵 概念区分）    
+"""
 def getProjectionMatrix(znear, zfar, fovX, fovY):
+    # fovX，fovY 是 视锥体的宽高比，或者说 相机的视场角
+    # top, bottom, right, left 计算的是 近平面上的视角矩形
+	# znear, zfar 定义 视锥体的深度
+    """
+    物体必须在视锥体范围内才能被渲染，否则会被裁剪掉:
+    近平面的位置 = 相机位置 + znear 距离
+    远平面的位置 = 相机位置 + zfar 距离
+    """
     tanHalfFovY = math.tan((fovY / 2))
     tanHalfFovX = math.tan((fovX / 2))
 
@@ -94,20 +108,68 @@ def focal2fov(focal, pixels):
     return 2*math.atan(pixels/(2*focal))
 
 def look_at(camera_position, target_position, up_dir):
+
+    # 计算相机坐标:
+    """
+    在 3D 计算机图形学中，相机有自己的局部坐标系，通常规定：
+		- X 轴 (Right): 相机的右方向，通常希望与“世界上方向 (up_dir)”尽可能保持正交
+		- Y 轴 (Up): 相机的上方向，必须垂直于 X 轴和 Z 轴，确保是右手坐标系
+		- Z 轴 (Backward): 相机的朝向方向（但在 OpenGL 里是 -Z）
+    """
+    # 计算相机方向（从目标指向相机，即相机的 -Z 轴方向）
     camera_direction = camera_position - target_position
     camera_direction = camera_direction / np.linalg.norm(camera_direction)
+
+    # 计算相机的“右方向” (X 轴方向)
+    """
+    1. up_dir: 通常是 [0,0,1]，代表世界 z 轴的“上”方向
+    2. 得到右方向 camera_right: 这个方向垂直于 up_dir 和 camera_direction 组成的平面
+    """
     camera_right = np.cross(up_dir, camera_direction)
     camera_right = camera_right / np.linalg.norm(camera_right)
+
+    # 计算相机的“上方向” (Y 轴方向)  
+    """
+    利用 camera_right 和 camera_direction 计算出 camera_up
+    """
     camera_up = np.cross(camera_direction, camera_right)
     camera_up = camera_up / np.linalg.norm(camera_up)
+
+    # 组装 4*4 齐次坐标下的变换矩阵:
+    # 这个变换矩阵将 世界坐标系中的点变换到相机坐标系。
+    """
+    1. `camera_right` 作为第一行，表示相机的 X 轴
+    2. `camera_up` 作为第二行，表示相机的 Y 轴
+    3. `camera_direction` 作为第三行，表示相机的 -Z 轴
+    """
     rotation_transform = np.zeros((4, 4))
     rotation_transform[0, :3] = camera_right
     rotation_transform[1, :3] = camera_up
     rotation_transform[2, :3] = camera_direction
-    rotation_transform[-1, -1] = 1.0
+    rotation_transform[-1, -1] = 1.0    # 
+
+    # 计算平移变换矩阵：
+    # 创建一个 4×4 单位矩阵，用于存储平移变换
+    """
+    np.eye(num):
+    torch
+    """
     translation_transform = np.eye(4)
+    """
+    假设相机位置是 camera_position = (X, Y, Z)，我们希望：
+		- 把整个世界坐标系 向相机的反方向移动  ( -X, -Y, -Z ) 。
+		- 这样，相机在新坐标系下位于原点 (0,0,0)，方便计算。
+    但是，切记，别忘了旋转，所以 平移矩阵应该是 R · -C
+    """
     translation_transform[:3, -1] = -np.array(camera_position)
+
+    # 组装 平移矩阵和旋转矩阵
     look_at_transform = np.matmul(rotation_transform, translation_transform)
+
+    # 
+    # 翻转 Y 轴和 Z 轴，使得矩阵符合期望的坐标系统。
+    # 将 行存储 转化为 列存储
     look_at_transform[1:3, :] *= -1
     look_at_transform=look_at_transform.T
+    
     return look_at_transform

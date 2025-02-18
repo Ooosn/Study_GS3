@@ -124,7 +124,11 @@ class Scene:
         self.cameras_extent = scene_info.nerf_normalization["radius"]
 
         # 按照缩放比例分类，默认只有原始分辨率
-        # 为每个缩放比例创建一个相机列表，从scene_info.train_cameras和scene_info.test_cameras中加载相机信息，并用 resolution_scale 调整参数，返回 Camera 对象列表
+        # 并且在此过程中，创建 相机 nn.module 对象 ———— 特别是:
+        #                 self.cam_pose_adj = torch.nn.Parameter(torch.zeros((1, 6), requires_grad=True).cuda())
+        #                 self.pl_adj = torch.nn.Parameter(torch.zeros((1, 3), requires_grad=True).cuda())
+        # 因此后面可以直接将这两个参数传入 优化器 torch.optim.Adam
+        # 将之前的 scene_info 中的相机信息，按照缩放比例调整参数，返回 Camera 对象列表
         """
             Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY, cx=cam_cx, cy=cam_cy,

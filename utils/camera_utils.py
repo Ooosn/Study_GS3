@@ -33,8 +33,8 @@ def loadCam(args, id, cam_info, resolution_scale):
             - cx (float): Camera principal point x-coordinate.
             - cy (float): Camera principal point y-coordinate.
             - uid (int): Unique identifier for the camera.
-            - R (np.ndarray): Rotation matrix.
-            - T (np.ndarray): Translation vector.
+            - R (np.ndarray): Rotation matrix, R_W2C
+            - T (np.ndarray): Translation vector, T_W2C = -R * T_world
             - FovX (float): Field of view in the x direction.
             - FovY (float): Field of view in the y direction.
             - pl_pos (np.ndarray): Position of the point light.

@@ -47,7 +47,7 @@ class Mixture_of_ASG(nn.Module):
         asg_scales[:, 0] = asg_scales[:, 0] * 0.5
         self.asg_scales = nn.Parameter(asg_scales.requires_grad_(True))
         
-        # A初始化 各 asg 的旋转方向
+        # 初始化 各 asg 的旋转方向
         # 依然采用 四元数
         asg_rotation = torch.zeros((self.basis_asg_num, 4), dtype=torch.float, device="cuda")
         asg_rotation[:, 0] = 1
@@ -74,7 +74,10 @@ class Mixture_of_ASG(nn.Module):
     def get_asg_normal(self):
         return self.get_asg_axis[:, :, 2] # (basis_asg_num, 3)
     
-
+    # alpha = gaussians.get_alpha_asg                   # (N, basis_asg_num)
+    # local_axises = gaussians.get_local_axis           # (N, 3, 3)
+    # asg_scales = gaussians.asg_func.get_asg_lam_miu   # (basis_asg_num, 2)
+    # asg_axises = gaussians.asg_func.get_asg_axis      # (basis_asg_num, 3, 3)
     def forward(self, wi, wo, alpha, asg_scales, asg_axises):
         """
         wi, wo: (N, 3)

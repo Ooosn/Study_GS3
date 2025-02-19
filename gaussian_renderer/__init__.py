@@ -167,16 +167,45 @@ def render(viewpoint_camera,
                 wi = wi_ray * torch.sqrt(dist_2_inv) # (K, 3)
                 # 归一化视角方向
                 wo = _safe_normalize(viewpoint_camera.camera_center - gau.get_xyz) # (K, 3)
+                # local_axises 由 4元数 构建，因此高斯法线是归一化的
+                local_z = local_axises[:, :, 2] # (K, 3)
 
-                   local_z = local_axises[:, :, 2] # (K, 3)
                 # transfer to local axis
+                # 利用从 mbrdf 参数组中的得到的 local_axises 将 wi 和 wo 转移到对应的 高斯点-asg 坐标系 中
+                """
+                torch.einsum(): torch 计算的升级版，能够自定义很多种计算方式，例如：
+                    - "Ki,Kij->Kj" 相当于 bmm
+                    - "ik,kj->ij" 相当于 matmul
+                    - "i,i->" 相当于 dot
+                    - "ij->j" 相当于 torch.sum(A, dim=0)
+                    等等 
+                """
                 wi_local = torch.einsum('Ki,Kij->Kj', wi, local_axises) # (K, 3)
                 wo_local = torch.einsum('Ki,Kij->Kj', wo, local_axises) # (K, 3)
-                # shading functions
-                cosTheta = _NdotWi(local_z, wi, torch.nn.ELU(alpha=0.01), 0.01)
+
+                # shading functions:
+                """
+                该部分计算每个高斯点的直接光照贡献，不考虑阴影（遮挡）或全局光照（间接光照）的影响。
+                计算基于入射光的漫反射（Lambertian 反射）和镜面反射（基于 ASG 近似的高光反射）。
+
+                · asg: asg 的旋转矩阵用于调整 asg 在高斯点局部坐标系中的方向
+                        - asg 的 z 轴为 高斯球面的中心，也就是高光最密集的方向
+                · mbdrf: 不直接使用表面法线，而是用 半角向量 h 作为“微表面法线” 进行计算
+                        - 通过计算 h 和 asg 的夹角，来控制高光强度和形状，最终得出 wo 方位的反射强度
+
+                · colors_precomp: 它代表的是 光照强度(irradiance)，由漫反射和镜面反射的贡献相加计算得到
+                · local_axises: 是 高斯点的局部坐标系，由每个高斯点的局部旋转矩阵 local_q 得到
+                · local_z: local_axises 中的 z 轴，相当于每一个高斯点的法线
+                · cosTheta: Lambertian 余弦项，考虑入射角度对光照强度的影响
+                · dist_2_inv: 光源的距离的倒数，考虑光强的距离衰减（通常 光照强度 与距离平方 成反比）
+                
+                -> 因此使用 colors_precomp * cosTheta * dist_2_inv 来修正颜色
+                """
+                cosTheta = _NdotWi(local_z, wi, torch.nn.ELU(alpha=0.01), 0.01)     # local_z, wi 都是朝外的，方向一致
                 diffuse = gau.get_kd / math.pi
                 specular = gau.get_ks * gau.asg_func(wi_local, wo_local, gau.get_alpha_asg, asg_scales, asg_axises) # (K, 3)
-            
+
+                # 刚开始只考虑 漫反射，不考虑其他反射，优化高斯的基础颜色
                 if fix_labert:
                     colors_precomp = diffuse
                 else:
@@ -264,9 +293,10 @@ def _safe_normalize(x):
 
 def _NdotWi(nrm, wi, elu, a):
     """
-    nrm: (K, 3)
-    wi: (K, 3)
-    return (K, 1)
+    nrm: (N, 3)
+    wi: (N, 3)
+    _dot(nrm, wi): (N, 1)
+    return (N, 1)
     """
     tmp  = a * (1. - 1 / math.e)
     return (elu(_dot(nrm, wi)) + tmp) / (1. + tmp)

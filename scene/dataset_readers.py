@@ -170,8 +170,8 @@ def readCamerasFromTransforms(path, transformsfile, white_background, view_num, 
                 # get the world-to-camera transform and set R, T
                 w2c = np.linalg.inv(c2w)
 
-                # glm 默认使用列主序存储，而 NumPy（或 OpenCV）通常使用行主序。
-                R = np.transpose(w2c[:3,:3])  # R is stored transposed due to 'glm' in CUDA code
+                # OpenGL 中矩阵是列存储，所以这里要转置和其他矩阵对齐
+                R = np.transpose(w2c[:3,:3])  
                 T = w2c[:3, 3]
 
             bg = np.array([1, 1, 1]) if white_background else np.array([0, 0, 0])

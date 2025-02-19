@@ -314,7 +314,7 @@ class GaussianModel:
             self.alpha_asg = nn.Parameter(alpha_asg.requires_grad_(True))
             self.asg_func = Mixture_of_ASG(self.basis_asg_num)  # forward(self, wi, wo, alpha_asg, asg_scales, asg_axises):
             
-            # 局部旋转四元数（法线？）
+            # 局部旋转四元数（修正 wi 和 wo）
             local_rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
             local_rots[:, 0] = 1
             self.local_q = nn.Parameter(local_rots.requires_grad_(True))

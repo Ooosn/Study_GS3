@@ -161,6 +161,7 @@ def strip_symmetric(sym):
 def build_rotation(r):
     norm = torch.sqrt(r[:,0]*r[:,0] + r[:,1]*r[:,1] + r[:,2]*r[:,2] + r[:,3]*r[:,3])
 
+    # 归一化 四元数 ，使最终的旋转矩阵是 严格的正交矩阵
     q = r / norm[:, None]
 
     R = torch.zeros((q.size(0), 3, 3), device='cuda')

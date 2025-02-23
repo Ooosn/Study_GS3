@@ -163,15 +163,34 @@ def readCamerasFromTransforms(path, transformsfile, white_background, view_num, 
                 T = np.asarray(frame["T_opt"])
             else:
                 # NeRF 'transform_matrix' is a camera-to-world transform
-                c2w = np.array(frame["transform_matrix"])
                 # change from OpenGL/Blender camera axes (Y up, Z back) to COLMAP (Y down, Z forward)
+                """
+                OpenGL/Blender 中，c2w 是一个 camera-to-world 变换矩阵，它的列向量表示新坐标轴在世界坐标系中的方向:
+                	- 第一列 c2w[:,0] 代表 相机 x 轴在世界坐标系中的方向。
+                	- 第二列 c2w[:,1] 代表 相机 y 轴在世界坐标系中的方向。
+                	- 第三列 c2w[:,2] 代表 相机 z 轴在世界坐标系中的方向。
+                	- 第四列 c2w[:,3] 代表 相机在世界坐标系中的位置 T = C_W。
+                因此 T 在 c2w初 中的取值和坐标轴的旋转无关
+                """
+                c2w = np.array(frame["transform_matrix"])
                 c2w[:3, 1:3] *= -1
 
                 # get the world-to-camera transform and set R, T
+                """
+                w2c = c2w^-1:
+                    - [:3,:3] 中行向量作为坐标轴
+                    - T = -R^T C_W
+                """
                 w2c = np.linalg.inv(c2w)
 
-                # OpenGL 中矩阵是列存储，所以这里要转置和其他矩阵对齐
+                # 为了和后面的计算对齐，因此取转置
+                """
+                !!! 高斯点的坐标一般为 (N,3)，因此坐标以行向量的形式存在，为了和行向量匹配: 
+                转置后 列向量作为基向量，坐标采用行向量，因此右乘 R，可将世界坐标系下的点变换到相机坐标系下，得到的也是 行向量坐标
+                即: P' = R P    ->    (P')^T = P^T R^T
+                """
                 R = np.transpose(w2c[:3,:3])  
+                # 取出 1D数组，# 如果需要向量结构，自行 unsqueeze()
                 T = w2c[:3, 3]
 
             bg = np.array([1, 1, 1]) if white_background else np.array([0, 0, 0])

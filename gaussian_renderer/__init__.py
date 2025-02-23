@@ -31,24 +31,31 @@ def render(viewpoint_camera,
            asg_axises, 
            pipe, 
            bg_color : torch.Tensor, 
-           scaling_modifier = 1.0, 
-           override_color = None, 
-           fix_labert = False, 
-           inten_scale = 1.0,
-           is_train = False):
+           scaling_modifier = 1.0,  # 高斯点的缩放因子，默认为 1.0，用于二次调整整体的高斯点大小
+           override_color = None,   # 覆盖学习到的颜色，默认为 None，即使用学习到的颜色
+           fix_labert = False,  # 是否只考虑漫反射，根据当前迭代次数来决定
+           inten_scale = 1.0,   # 颜色强度缩放，但是感觉被弃用了
+           is_train = False,    # 根据 prune_visibility
+           simplify = False,):  # 简化代码，没啥用
+    
     """
     Render the scene. 
     
     Background tensor (bg_color) must be on GPU!
     """
-    # 计算光栅化参数:
-    # 计算相机的原始焦距:
+
+    # 根据当前 相机信息 计算 光栅化参数:
+    # 计算相机的原始焦距: f = \frac{W}{2 \tan(\frac{\text{FoV}}{2})}
     # Set up rasterization configuration
-    tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
-    tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
-    # calculate the fov and projmatrix of light
-    fx_origin = viewpoint_camera.image_width / (2. * tanfovx)
-    fy_origin = viewpoint_camera.image_height / (2. * tanfovy)
+    if simplify:
+        fx_origin = fov2focal(viewpoint_camera.FoVx, viewpoint_camera.image_width)
+        fy_origin = fov2focal(viewpoint_camera.FoVy, viewpoint_camera.image_height)
+    else:    
+        tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
+        tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
+        # calculate the fov and projmatrix of light
+        fx_origin = viewpoint_camera.image_width / (2. * tanfovx)
+        fy_origin = viewpoint_camera.image_height / (2. * tanfovy)
 
     # calculate the fov for shadow splatting:
     # 计算光源和相机的距离比 f_scale_ratio
@@ -57,10 +64,10 @@ def render(viewpoint_camera,
     f_scale_ratio = np.sqrt(np.sum(light_position * light_position) / np.sum(camera_position * camera_position))
     
     # 计算光源的焦距
-    """
-    1. 因为这里将光源作为一个相机，因此使用相机的 焦距
-    2. 焦距随着距离成比例缩放
-    3. 因此通过计算光源和相机的距离比，来缩放光源的 焦距
+    """ 
+    1. 焦距随着距离成比例缩放
+    2. 这里将光源作为一个相机
+    3. 因此通过计算光源和相机的距离比，来缩放得到光源的 焦距
     """
     fx_far = fx_origin * f_scale_ratio
     fy_far = fy_origin * f_scale_ratio
@@ -84,9 +91,10 @@ def render(viewpoint_camera,
     fovy_far = 2 * math.atan(tanfovy_far)
 
 
-    # 光源方向的高斯泼溅: 
+    # 光源方向的高斯泼溅（1）视角转换准备工作: 
     # 用于计算 shadow （shadow splatting）
     # 计算 世界坐标系 到 光源坐标系 的变换矩阵
+    # 目前每个高斯点的坐标采取 行向量 来表示
     object_center=gau.get_xyz.mean(dim=0).detach()
     world_view_transform_light=look_at(light_position,
                                        object_center.detach().cpu().numpy(),
@@ -94,10 +102,12 @@ def render(viewpoint_camera,
     world_view_transform_light=torch.tensor(world_view_transform_light,
                                             device=viewpoint_camera.world_view_transform.device,
                                             dtype=viewpoint_camera.world_view_transform.dtype)
+    # 为了对齐 点 为行向量: P' = Pro Tw2c P  ->  P'^T = P^T (Tw2c)^T (Pro)^T
+    # 这里对 投影矩阵进行转置, torch.transpose(0, 1)
     light_prjection_matric = getProjectionMatrix(znear=viewpoint_camera.znear, zfar=viewpoint_camera.zfar, fovX=fovx_far, fovY=fovy_far).transpose(0,1).cuda()
     # 计算 MVP 矩阵，M2W变换矩阵*W2C变换矩阵*投影矩阵 （这里 高斯点本来就在世界坐标中，所以 M 可以忽略）
     full_proj_transform_light = (world_view_transform_light.unsqueeze(0).bmm(light_prjection_matric.unsqueeze(0))).squeeze(0)
-    
+    # 设置光源的高斯泼溅参数
     raster_settings_light = GaussianRasterizationSettings_light(
         image_height = int(viewpoint_camera.image_height),
         image_width = int(viewpoint_camera.image_width),
@@ -112,14 +122,15 @@ def render(viewpoint_camera,
         prefiltered = False,
         debug = pipe.debug,
     )
-    
+    # 光源方向的高斯泼溅（2）高斯场景准备工作: 
+    # 获得高斯点的 3D坐标、透明度、并初始化 2D坐标
     # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
     screenspace_points = torch.zeros_like(gau.get_xyz, dtype=gau.get_xyz.dtype, requires_grad=False, device="cuda") + 0
-
     means3D = gau.get_xyz
     means2D = screenspace_points
     opacity = gau.get_opacity
 
+    # 计算高斯点的方差:
     # If precomputed 3d covariance is provided, use it. If not, then it will be computed from
     # scaling / rotation by the rasterizer.
     scales = None
@@ -131,10 +142,15 @@ def render(viewpoint_camera,
         scales = gau.get_scaling
         rotations = gau.get_rotation
 
+    # 光源方向的高斯泼溅（3）光源方向高斯泼溅信息计算: 
     # shadow splatting
-    light_stream.wait_stream(torch.cuda.current_stream())
+    light_stream.wait_stream(torch.cuda.current_stream())   # 等待计算完成，因为下面要使用新的流，且有依赖
+
     with torch.no_grad():
-        with torch.cuda.stream(light_stream):
+        """
+        !!! 阴影 shadow 从已有的高斯场景信息计算的，不是用来优化高斯本身，因此这里不能有梯度 
+        """   
+        with torch.cuda.stream(light_stream):   # 在光源流中进行计算
             rasterizer_light = GaussianRasterizer_light(raster_settings=raster_settings_light)
             opacity_light = torch.zeros(scales.shape[0], dtype=torch.float32, device=scales.device)
             _, out_weight, _, shadow = rasterizer_light(
@@ -151,6 +167,10 @@ def render(viewpoint_camera,
                 thres = 4,
                 is_train = is_train)
 
+    # 1）光源方向的高斯泼溅（4）计算最终阴影:
+    # 2）计算其他效果:
+    # 3) 计算高斯点的最终颜色:
+    # MBDRF 和 SH 的选择
     # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
     # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
     shs = None
@@ -158,6 +178,9 @@ def render(viewpoint_camera,
     if override_color is None:
         if gau.use_MBRDF:
             with torch.cuda.stream(calc_stream):
+                """
+                使用计算颜色的流，和光源流同步，两者间不存在数据竞争
+                """
                 assert viewpoint_camera.pl_pos.shape[0] == 1
                 # calculate view and light dirs
                 pl_pos_expand = viewpoint_camera.pl_pos.expand(gau.get_xyz.shape[0], -1) # (K, 3)
@@ -180,6 +203,7 @@ def render(viewpoint_camera,
                     - "ij->j" 相当于 torch.sum(A, dim=0)
                     等等 
                 """
+                # 右乘旋转矩阵，或者左乘旋转矩阵的逆
                 wi_local = torch.einsum('Ki,Kij->Kj', wi, local_axises) # (K, 3)
                 wo_local = torch.einsum('Ki,Kij->Kj', wo, local_axises) # (K, 3)
 
@@ -219,27 +243,58 @@ def render(viewpoint_camera,
             
             # shaodow splat values
             opacity_light = torch.clamp_min(opacity_light, 1e-6)    # 防止最小值为0，产生 NaN
-            shadow = shadow / opacity_light # (K,)
+            # 归一化阴影值，使其不受不透明度影响
+            shadow = shadow / opacity_light # (N,)
             assert not torch.isnan(shadow).any()
             
             # 神经网络优化 shadow 和 其他效果
             # neural components
-            decay, other_effects = gau.neural_phasefunc(wi, wo, gau.get_xyz, gau.get_neural_material, shadow.unsqueeze(-1)) # (K, 1), (K, 3)
+            decay, other_effects = gau.neural_phasefunc(wi, wo, gau.get_xyz, gau.get_neural_material, shadow.unsqueeze(-1)) # (N, 1), (N, 3)
             
-            colors_precomp = torch.concat([colors_precomp * inten_scale, decay, other_effects * dist_2_inv * inten_scale], dim=-1) # (K, 7)
+            # combine all components
+            colors_precomp = torch.concat([colors_precomp * inten_scale, decay, other_effects * dist_2_inv * inten_scale], dim=-1) # (N, 7)
+        
+        # 是否使用 SH 来计算颜色
         elif pipe.convert_SHs_python:
-            shs_view = gau.get_features.transpose(1, 2).view(-1, 3, (gau.max_sh_degree+1)**2)
+            # 获得 SH 的特征
+            """
+            gau.get_features:   features_dc = self._features_dc
+                                features_rest = self._features_rest
+                                return torch.cat((features_dc, features_rest), dim=1) 
+                                输入：(N, 1, C) + (N, D-1, C)
+                                输出：(N, D, C)
+            transpose:          (N, D, C)   ->  (N, C, D)
+            view:               (N, C, D)   ->  (N, C, D)   
+            """
+            shs_view = gau.get_features.transpose(1, 2).contiguous().view(-1, 3, (gau.max_sh_degree+1)**2)
             dir_pp = (gau.get_xyz - viewpoint_camera.camera_center.repeat(gau.get_features.shape[0], 1))
+            # 归一化方向
+            """
+            为什么要加 keepdim = True?
+            因为:
+                广播只能向前广播，比如 (x) -> (1, x) -> (N, x)
+                不能向后广播，比如 (x) -> (N, 1) -> (N, x)
+            """
             dir_pp_normalized = dir_pp/dir_pp.norm(dim=1, keepdim=True)
+            # 计算 SH 到 RGB 的转换
             sh2rgb = eval_sh(gau.active_sh_degree, shs_view, dir_pp_normalized)
+            # 将 sh2rgb [-0.5, 0.5] -> [0, 1]，并且截断不合理的值
             colors_precomp = torch.clamp_min(sh2rgb + 0.5, 0.0)
+        
         else:
+            # 不使用 SH，pass
             shs = gau.get_features
+    
+    # 如果 override_color 不为 None，则使用 override_color 作为颜色
     else:
         colors_precomp = override_color
-    torch.cuda.synchronize()
-    # Rasterize visible Gaussians to image, obtain their radii (on screen). 
 
+
+    # 视角方向的高斯泼溅:
+    #（这里使用的 gsplat 库，没有用原装 3dgs 的库）
+    torch.cuda.synchronize()    # 等待所有流完成
+    # Rasterize visible Gaussians to image, obtain their radii (on screen). 
+    # 根据 FoV 计算 焦距 
     focalx = fov2focal(viewpoint_camera.FoVx, viewpoint_camera.image_width)
     focaly = fov2focal(viewpoint_camera.FoVy, viewpoint_camera.image_height)
     K = torch.tensor([[focalx, 0, viewpoint_camera.cx], [0, focaly, viewpoint_camera.cy], [0., 0., 1.]], device="cuda")
@@ -262,9 +317,19 @@ def render(viewpoint_camera,
     )
 
     # The intermediate results from fully_fused_projection
+    # (H, W, C) → (C, H, W)，即 (RGB 通道数，高度，宽度)
     rendered_image = rendered_image[0].permute(2, 0, 1)
     radii = meta['radii'].squeeze(0)
+    # 作用：确保 meta["means2d"] 在反向传播时保留梯度
     try:
+        """
+        torch.retain_grad() 作用：保留梯度，使得在反向传播时，该变量的梯度不会被释放 
+            - PyTorch 默认只存叶子节点 (即参数） 的 grad
+            - 因此即便中间变量的 grad 为 True，也不会保留，因为它不会被用于更新参数
+            # intermediate_variable.is_leaf = False
+            - 但是有时候我们需要中间变量的 grad，比如我们需要计算中间变量的梯度，或者我们需要中间变量的梯度来更新参数
+            -> 因此，我们可以使用 retain_grad() 来保留中间变量的梯度
+        """
         meta["means2d"].retain_grad() # [1, N, 2]
     except:
         pass
@@ -273,6 +338,11 @@ def render(viewpoint_camera,
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
 
+    # 返回渲染结果，根据不同的通道进行切分
+    """
+    !!!  colors_precomp = torch.concat
+    ([colors_precomp * inten_scale, decay, other_effects * dist_2_inv * inten_scale], dim=-1) # (N, 7)
+    """
     return {"render": rendered_image[0:3, :, :],
             "shadow": rendered_image[3:4, :, :],
             "other_effects": rendered_image[4:7, :, :],

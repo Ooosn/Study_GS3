@@ -25,6 +25,7 @@ class LPIPS(nn.Module):
 
         # linear layers
         self.lin = LinLayers(self.net.n_channels_list)
+        #  加载已经训练好的 LPIPS 线性变换层（1x1 卷积层）的权重，并且这些权重是 针对每个通道数自动匹配的
         self.lin.load_state_dict(get_state_dict(net_type, version))
 
     def forward(self, x: torch.Tensor, y: torch.Tensor):

@@ -276,10 +276,12 @@ class GaussianModel:
 
         # 初始化透明度：
         # 生成一个 形状为 (N,1) 的张量，N 为 点云/高斯点 数量，随后乘以 0.1 ， 使所有点透明度初始化为 0.1 
-        # 不直接存储 opacity ， 而是存储 inverse_sigmoid（opacity），这样子我们将透明度从[0,1]扩展至更大的范围，拥有更大的梯度取优化参数
+        # 不直接存储 opacity ， 而是存储 inverse_sigmoid（opacity）
         """
-        这算一个常见的 trick 了，当某个 参数 值变化范围过小，所以我们可以进行归一化，让其落入 [0,1] 区间， 当然他可能本身就是这个范围，
-        随后利用 inverse_sigmoid 将其映射到一个更大的区间，从而增大梯度变化范围，使其在优化过程中更具可训练性 (trainability)，提高梯度更新效率。
+        这是一个常见技巧，用于控制参数范围:
+        神经网络优化本身不会自动保持参数在 [0,1] 之内，优化过程中可能会超出这个范围
+        如果直接对 opacity 进行优化，因为梯度下降优化是无约束的，它可能会跑出 [0,1]
+        inverse_sigmoid 让优化参数可以自由更新，同时保证最终的 opacity 仍然落在 [0,1] 之内，这是一种 “间接控制参数范围” 的方法，解决了神经网络无法直接限制参数范围的问题
         """
         opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 

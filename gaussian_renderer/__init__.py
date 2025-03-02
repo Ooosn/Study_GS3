@@ -45,6 +45,7 @@ def render(viewpoint_camera,
     """
 
     # 根据当前 相机信息 计算 光栅化参数:
+
     # 计算相机的原始焦距: f = \frac{W}{2 \tan(\frac{\text{FoV}}{2})}
     # Set up rasterization configuration
     if simplify:
@@ -91,7 +92,9 @@ def render(viewpoint_camera,
     fovy_far = 2 * math.atan(tanfovy_far)
 
 
-    # 光源方向的高斯泼溅（1）视角转换准备工作: 
+
+    # 1）光源方向的高斯泼溅 ———— 视角转换准备工作: 
+
     # 用于计算 shadow （shadow splatting）
     # 计算 世界坐标系 到 光源坐标系 的变换矩阵
     # 目前每个高斯点的坐标采取 行向量 来表示
@@ -122,7 +125,12 @@ def render(viewpoint_camera,
         prefiltered = False,
         debug = pipe.debug,
     )
-    # 光源方向的高斯泼溅（2）高斯场景准备工作: 
+
+
+
+    # 2）光源方向的高斯泼溅 ———— 高斯场景准备工作: 
+    # 1）视角方向的高斯泼溅 ———— 高斯场景准备工作:
+
     # 获得高斯点的 3D坐标、透明度、并初始化 2D坐标
     # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
     screenspace_points = torch.zeros_like(gau.get_xyz, dtype=gau.get_xyz.dtype, requires_grad=False, device="cuda") + 0
@@ -142,10 +150,12 @@ def render(viewpoint_camera,
         scales = gau.get_scaling
         rotations = gau.get_rotation
 
-    # 光源方向的高斯泼溅（3）光源方向高斯泼溅信息计算: 
-    # shadow splatting
-    light_stream.wait_stream(torch.cuda.current_stream())   # 等待计算完成，因为下面要使用新的流，且有依赖
 
+
+    # 3）光源方向的高斯泼溅 ———— 光源方向高斯泼溅信息计算: 
+
+    # shadow splatting
+    light_stream.wait_stream(torch.cuda.current_stream())   # 等待计算完成，因为下面要使用新的流，且有依赖    
     with torch.no_grad():
         """
         !!! 阴影 shadow 从已有的高斯场景信息计算的，不是用来优化高斯本身，因此这里不能有梯度 
@@ -167,9 +177,10 @@ def render(viewpoint_camera,
                 thres = 4,
                 is_train = is_train)
 
-    # 1）光源方向的高斯泼溅（4）计算最终阴影:
-    # 2）计算其他效果:
-    # 3) 计算高斯点的最终颜色:
+
+
+    # 4）光源方向的高斯泼溅 ———— ① 计算最终阴影 ② 计算其他效果 ③ 计算高斯点的最终颜色:
+
     # MBDRF 和 SH 的选择
     # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
     # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
@@ -203,7 +214,8 @@ def render(viewpoint_camera,
                     - "ij->j" 相当于 torch.sum(A, dim=0)
                     等等 
                 """
-                # 右乘旋转矩阵，或者左乘旋转矩阵的逆
+                # local矩阵是 列向量作为基，因此 wi 和 wo 需要左乘 local_axises 的逆矩阵
+                # 而这里 wi 和 wo 是行向量，因此需要右乘 local_axises 的逆矩阵的转置，也就是 local_axises 的本身
                 wi_local = torch.einsum('Ki,Kij->Kj', wi, local_axises) # (K, 3)
                 wo_local = torch.einsum('Ki,Kij->Kj', wo, local_axises) # (K, 3)
 
@@ -224,6 +236,14 @@ def render(viewpoint_camera,
                 · dist_2_inv: 光源的距离的倒数，考虑光强的距离衰减（通常 光照强度 与距离平方 成反比）
                 
                 -> 因此使用 colors_precomp * cosTheta * dist_2_inv 来修正颜色
+                """
+                """
+                类似于 relu 函数，但是当 x < 0 时，输出为 0.01 * (exp(x) - 1)，而不是 0
+                这里使 cosTheta dot(nrm, wi) 可能为负，意味着角度大于 90°，但是我们仍然希望计算得到一个非负的值，因此使用 elu，并在后面使用 tmp 来修正
+                ！！！为什么不用 softplus 函数？
+                    - 因为 点乘 的范围最小值为 -1，因此 elu 的输出最小值为 0.01 * (exp(-1) - 1) = -0.069，在后面使用正的 tmp 来修正，从而实现值域大于等于 0
+                    - 而 -1 在 softplus 中，输出为 0.318，显然太大了，因此使用 elu 更合理，当然也可以使用负的 tmp 来修正
+                    - 而且 elu 可以对负数部分 用 α 来进一步调整，而 softplus 不能
                 """
                 cosTheta = _NdotWi(local_z, wi, torch.nn.ELU(alpha=0.01), 0.01)     # local_z, wi 都是朝外的，方向一致
                 diffuse = gau.get_kd / math.pi
@@ -251,7 +271,7 @@ def render(viewpoint_camera,
             # neural components
             decay, other_effects = gau.neural_phasefunc(wi, wo, gau.get_xyz, gau.get_neural_material, shadow.unsqueeze(-1)) # (N, 1), (N, 3)
             
-            # combine all components
+            # combine all components，按通道拼接，等待传入视角方向的高斯泼溅
             colors_precomp = torch.concat([colors_precomp * inten_scale, decay, other_effects * dist_2_inv * inten_scale], dim=-1) # (N, 7)
         
         # 是否使用 SH 来计算颜色
@@ -290,11 +310,13 @@ def render(viewpoint_camera,
         colors_precomp = override_color
 
 
-    # 视角方向的高斯泼溅:
+
+    # 2）视角方向的高斯泼溅 ———— 高斯场景泼溅:
+
     #（这里使用的 gsplat 库，没有用原装 3dgs 的库）
     torch.cuda.synchronize()    # 等待所有流完成
     # Rasterize visible Gaussians to image, obtain their radii (on screen). 
-    # 根据 FoV 计算 焦距 
+    # 传入之前根据光照角度得到的 colors_precomp，进行当前视角的高斯泼溅
     focalx = fov2focal(viewpoint_camera.FoVx, viewpoint_camera.image_width)
     focaly = fov2focal(viewpoint_camera.FoVy, viewpoint_camera.image_height)
     K = torch.tensor([[focalx, 0, viewpoint_camera.cx], [0, focaly, viewpoint_camera.cy], [0., 0., 1.]], device="cuda")
@@ -338,7 +360,11 @@ def render(viewpoint_camera,
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
 
-    # 返回渲染结果，根据不同的通道进行切分
+    # precomp 的通道顺序：
+    # 1. 高斯颜色 [N, 3]
+    # 2. 阴影 [N, 1]
+    # 3. 其他效果 [N, 3]
+    # 返回渲染结果，根据不同的通道进行切分，获得各个部分的高斯泼溅结果
     """
     !!!  colors_precomp = torch.concat
     ([colors_precomp * inten_scale, decay, other_effects * dist_2_inv * inten_scale], dim=-1) # (N, 7)
@@ -354,6 +380,7 @@ def render(viewpoint_camera,
             # - 一个完全不透明、离相机很近、覆盖多个像素的点 -> 大权重
             # - 一个半透明、离相机远、只覆盖一个像素的点 -> 小权重
             "out_weight": out_weight}
+
 
 def _dot(x, y):
     return torch.sum(x * y, -1, keepdim=True)

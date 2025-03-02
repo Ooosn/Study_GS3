@@ -56,8 +56,10 @@ class BaseNet(nn.Module):
         output = []
         for i, (_, layer) in enumerate(self.layers._modules.items(), 1):
             x = layer(x)
+            # 如果当前层是目标层，则提取特征图
             if i in self.target_layers:
                 output.append(normalize_activation(x))
+                # 如果提取的特征图数量与目标层数量相同，则停止提取
             if len(output) == len(self.target_layers):
                 break
         return output
@@ -68,7 +70,10 @@ class SqueezeNet(BaseNet):
         super(SqueezeNet, self).__init__()
 
         self.layers = models.squeezenet1_1(True).features
+        # 选择 SqueezeNet 的某些层作为目标层，提取用于后续对比
         self.target_layers = [2, 5, 8, 10, 11, 12, 13]
+        # 每个目标层对应的通道数，是固定好的，因此需要对齐
+        # 用于 LPIPS 的线性变换层（1x1 卷积层）的权重，是针对每个通道数自动匹配的
         self.n_channels_list = [64, 128, 256, 384, 384, 512, 512]
 
         self.set_requires_grad(False)

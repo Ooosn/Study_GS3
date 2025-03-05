@@ -104,6 +104,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     light_stream = torch.cuda.current_stream()
     calc_stream = torch.cuda.current_stream()
     
+    dddd = 0
+
     """开始训练"""
     # 每次迭代，都会从视点堆栈中选择一个视点，然后渲染图像，计算损失，更新模型参数，并不是每次计算全部视点的损失
     for iteration in range(first_iter, opt.iterations + 1):    #左闭右开区间，因此加1
@@ -157,6 +159,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # 为当前迭代选择一个视点
         viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
 
+
+
         """！开始渲染"""
         # debug用，一般不需要
         if (iteration - 1) == debug_from:
@@ -171,19 +175,25 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         asg_axises = gaussians.asg_func.get_asg_axis    # (basis_asg_num, 3, 3)
 
         # only opt with diffuse term at the beginning for a stable training process
-        if iteration < opt.spcular_freeze_step + opt.fit_linear_step:
+        if iteration < opt.spcular_freeze_step + opt.fit_linear_step:   # 只考虑漫反射，不考虑镜面反射，刚开始训练时，先优化漫反射，赋予每个高斯点一个基础颜色
             render_pkg = render(viewpoint_cam, gaussians, light_stream, calc_stream, local_axises, asg_scales, asg_axises, pipe, bg, fix_labert=True, is_train=prune_visibility)
-        else:
+        else:    # 开始考虑镜面反射             
             render_pkg = render(viewpoint_cam, gaussians, light_stream, calc_stream, local_axises, asg_scales, asg_axises, pipe, bg, is_train=prune_visibility)
         
         # 此外，取出各个高斯点云坐标、可见性、半径，用于后续修剪
         viewspace_point_tensor, visibility_filter, radii = render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
         image, shadow, other_effects = render_pkg["render"], render_pkg["shadow"], render_pkg["other_effects"]
-        
+        if render_pkg["out_weight"].sum() > 0:
+            print("################################")
+            print(render_pkg["out_weight"])
+            print("################################")
+        # 如果迭代次数小于 unfreeze_iterations，则不考虑阴影和次要效果，此时 shadow 和 other_effects 都是 0
         if iteration <= unfreeze_iterations:
             image = image
         else:
             image = image * shadow + other_effects
+
+
 
         """！！Loss部分"""
         # 获取真实图片数据
@@ -202,11 +212,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
         
         # 反向传播，计算各个参数的梯度
+        # 尚未更新参数，等待后续挑选更新
         loss.backward()
+        iter_end.record() # 记录迭代结束的时间
 
-        iter_end.record()
 
-        # torch.no_grad() 用于关闭梯度计算，加速模型的预测和推理过程
+
+        """！！参数更新部分"""
+        # torch.no_grad() 防止污染计算图，加快计算速度
         with torch.no_grad():
             # Progress bar，平滑损失曲线
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
@@ -224,9 +237,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
 
+
+            # 对于测试集：：：：：  
+            # 只用于优化场景光源和相机信息，因为这些信息可能是未知的，需要通过优化来估计    
             if opt_test and scene.optimizing:  
                 """这里是否有一个漏洞，当 scene.optimizing 为 false 时，测试集也会进入后续的 else 分支，但是本文中可能默认 optimizing 为 true ，阴差阳错"""
-                # 只是用于优化场景光源和相机信息，因为这些信息是未知的，需要通过优化来估计
                 # 不会用于直接优化高斯模型
                 if iteration < opt.iterations:
                     """"
@@ -242,13 +257,40 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     """
                     # 更新相机参数和光源参数
                     scene.optimizer.step()
+                    if iteration % 1000 == 0:
+                        print(scene.optimizer.param_groups[0]['params'][0].grad)
+                        print(scene.optimizer.param_groups[0]['params'][1].grad)
                     # 梯度清零
                     scene.optimizer.zero_grad(set_to_none = True)
                     # 梯度清零
                     gaussians.optimizer.zero_grad(set_to_none = True)
+                    """
+                    1. set_to_none=True
+                        .grad 直接变成 None。
+                        更省显存，因为 PyTorch 不会存 0 矩阵，而是完全释放梯度张量。
+                        计算时 会跳过 None 梯度的参数，不执行 += 操作
+                    2. set_to_none=False (default)
+                        梯度 .grad 变成全 0 矩阵。
+                        依然占用显存，但 PyTorch 计算梯度时 不会跳过这些参数，仍然会进行 += 操作（梯度累积时有用）。
+                    """
+                    
+                    if False:
+                        if iteration % 100 == 0:
+                            dddd += 1
+                            print("--------------------------------")
+                            print(dddd)
+                            print(viewpoint_cam.cam_pose_adj)
+                            print(viewpoint_cam.pl_adj)
+                            print(viewpoint_cam.R)
+                            print(viewpoint_cam.T)
+                            print(viewpoint_cam.pl_pos)
+                            print("--------------------------------")
+
+
+    
 
             # 进入训练集：：：：：
-            # 对于非测试集，即训练集进入正常阶段，进行高斯密集化，高斯修剪以及场景参数优化
+            # 1) 对于非测试集，即训练集进入正常阶段，先进行高斯密集化，高斯修剪以及场景参数优化:
             else:
 
                 # 第一步：：Densification, 高斯复制或分裂，when opt.density_from_iter < iteration < opt.densify_until_iter
@@ -283,7 +325,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         # 进行高斯密集化(复制和分裂)，传入的最大梯度，最小透明度，场景范围（相机视锥），尺寸阈值
                         # 最小透明度和尺寸阈值在这里直接调节
                         # 共涉及 高斯密集化，透明度修剪，尺寸修剪，权重修剪，四种对高斯点的修改
+                        if False:
+                            if iteration % 1000 == 0:
+                                print("################################")
+                                print(gaussians.xyz_gradient_accum)
+                                print(gaussians.denom)
+                            print("################################")
                         gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
+
                         # 判断高斯点数量是否超过最大高斯点数量的95%，如果超过，则进行高斯修剪，剔除掉不可见的点
                         if gaussians.get_xyz.shape[0] > gaussians.maximum_gs * 0.95:
                             prune_visibility = True
@@ -296,31 +345,45 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 else:
                     prune_visibility = False
 
+                # 2) 完成高斯修剪阶段，再开始更新参数:
                 # Optimizer step
-                if iteration < opt.iterations:
+                if iteration < opt.iterations:  # 判断是否处于优化阶段
                     gaussians.optimizer.step()
                     # opt the camera pose
-                    if scene.optimizing:
+                    if scene.optimizing:    # 判断是否开启相机优化
                         scene.optimizer.step()
                         scene.optimizer.zero_grad(set_to_none = True)
-                    gaussians.optimizer.zero_grad(set_to_none = True)
-                
+                    gaussians.optimizer.zero_grad(set_to_none = True)   # 梯度清零
+
+            """
+            1. 默认冻结 高斯点相位函数，初期训练高斯点场景空间为主，并只简单优化漫反射 kd (阴影和次要效果为 0)
+            2. 抵达 unfreeze_iterations 时，解冻 高斯点相位函数，开始优化 阴影，材质，次要效果等
+            3. 抵达 spcular_freeze_step 时，冻结 高斯点相位函数，再次只优化漫反射 kd
+            4. 抵达spcular_freeze_step + fit_linear_step 之后，解冻 高斯点相位函数，并同时开始同时优化镜面反射 ks
+            """
+            # 初期默认冻结 高斯点相位函数（负责处理光照相关的相位特性（如材质、阴影、次要效果等））
+            # 判断是否解冻 高斯点相位函数，解冻后该函数失效，由下列代码接管
             if phase_func_freezed and iteration >= unfreeze_iterations:
                 gaussians.neural_phasefunc.unfreeze()
                 phase_func_freezed = False
 
-            if (iteration in checkpoint_iterations):
-                print("\n[ITER {}] Saving Checkpoint".format(iteration))
-                torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
-
+            # 抵达 spcular_freeze_step 时：开始优化相变函数，但依然只考虑 漫反射
             if iteration == opt.spcular_freeze_step:
                 gaussians.neural_phasefunc.freeze()
                 gaussians.neural_material.requires_grad_(False)
-            
+
+            # spcular_freeze_step + fit_linear_step 之后：开始同时优化 镜面反射 和 漫反射
             if iteration == opt.spcular_freeze_step + opt.fit_linear_step:
                 gaussians.neural_phasefunc.unfreeze()
                 gaussians.neural_material.requires_grad_(True)
 
+            # 判断是否保存模型
+            if (iteration in checkpoint_iterations):
+                print("\n[ITER {}] Saving Checkpoint".format(iteration))
+                torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+
+
+        # 更新相机和光源参数：（之前只是更新了 adj 参数，尚未对相机和光源进行直接更新)，注意这里没有设置 torch.no_grad()
         # update cam and light
         if scene.optimizing:
             viewpoint_cam.update("SO3xR3")

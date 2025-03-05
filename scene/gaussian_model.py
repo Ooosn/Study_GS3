@@ -260,7 +260,6 @@ class GaussianModel:
         torch.repeat(1,3): 沿 dim = 1 重复三次
         [...,None]: 等于 torch.unsqueeze(-1)
         """
-        torch.squeeze()
         scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 3)
 
         # 初始化旋转矩阵：
@@ -808,29 +807,29 @@ class GaussianModel:
     """
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
         
-        if necessary: 
-            # grads 是累积的2D梯度张量，grad_threshold 是2D梯度阈值，scene_extent 是场景范围，N 是分裂数量
-            # 获取当前高斯点数量
-            num_points = self.get_xyz.shape[0]
-            # 初始化一个 tensor张量 用于后续的填充
-            padded_grad = torch.zeros((num_points), device="cuda")
-            """
-            grads.squeeze()：
-            （在 tensor 向量中，二维和一维的维度是不同的，二维是 (N, 1)，一维是 (N,)）
-            1. 将 grads 张量的维度从 (N, 1) 压缩到 (N,)，即去掉维度为1的维度，变为一维张量，用于和其他一维张量进行拼接，对齐。
-            2. 只适用于 grads 张量维度为 (N, 1) 的情况，如果 grads 维度为 (N, 2)，则不变
-            """
-            padded_grad[:grads.shape[0]] = grads.squeeze() # 其实直接 grads(:,0)也可以
-            # 通过2D梯度阈值，筛选出大于2D梯度阈值的点，得到一个布尔索引
-            """
-            torch.where(condition, x, y)：
-            1. 根据 condition 条件，选择 x 或 y 的值，如果 condition 为 True，则选择 x 的值，如果 condition 为 False，则选择 y 的值
-            2. 返回一个与 condition 形状相同的张量，用于标记满足条件的点
-            """
-            selected_pts_mask = torch.where(grads.squeeze() >= grad_threshold, True, False)
-        
-        # 前文有点啰嗦，直接用 padded_grad >= grad_threshold 就行
+        """
+        !!! 这里和 clone 部分不太一样，因为 clone 部分已经添加了新的高斯点，所以不能再直接 用 grads 进行筛选
+        """
+        # grads 是累积的2D梯度张量，grad_threshold 是2D梯度阈值，scene_extent 是场景范围，N 是分裂数量
+        # 获取当前高斯点数量
+        num_points = self.get_xyz.shape[0]
+        # 初始化一个 tensor张量 用于后续的填充
+        padded_grad = torch.zeros((num_points), device="cuda")
+        """
+        grads.squeeze()：
+        （在 tensor 向量中，二维和一维的维度是不同的，二维是 (N, 1)，一维是 (N,)）
+        1. 将 grads 张量的维度从 (N, 1) 压缩到 (N,)，即去掉维度为1的维度，变为一维张量，用于和其他一维张量进行拼接，对齐。
+        2. 只适用于 grads 张量维度为 (N, 1) 的情况，如果 grads 维度为 (N, 2)，则不变
+        """
+        padded_grad[:grads.shape[0]] = grads.squeeze() # 其实直接 grads(:,0)也可以
+        # 通过2D梯度阈值，筛选出大于2D梯度阈值的点，得到一个布尔索引
+        """
+        torch.where(condition, x, y)：
+        1. 根据 condition 条件，选择 x 或 y 的值，如果 condition 为 True，则选择 x 的值，如果 condition 为 False，则选择 y 的值
+        2. 返回一个与 condition 形状相同的张量，用于标记满足条件的点
+        """
         selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
+        
         """
         torch.logical_and 是逻辑与运算，用于筛选出同时满足两个条件的点，true and true 为 true
         torch.max(self.get_scaling, dim=1) 返回一个两个属性的对象，values 是最大值，indices 是最大值的索引
@@ -963,6 +962,7 @@ class GaussianModel:
         padded_out_weights[:out_weights_acc.shape[0]] = out_weights_acc.squeeze()   
         # 将新加入的点权重赋值给 padded_out_weights 张量，统一赋值为原本权重累加器中的最大权重
         padded_out_weights[out_weights_acc.shape[0]:] = torch.max(out_weights_acc)
+        print(padded_out_weights)
 
         # 1）透明度修剪掩码
         # 计算透明度过低所导致的修剪掩码，将所有点的透明度与最小透明度进行比较，小于最小透明度的点为 True，否则为 False
@@ -1022,6 +1022,7 @@ class GaussianModel:
     """    
     def prune_visibility_mask(self, out_weights_acc):
         n_before = self.get_xyz.shape[0]    # 当前高斯点数量，可能由于密集化产生变化
+        print(n_before)
         n_after = self.maximum_gs   # 最大高斯点数量，由自己设置
         # 计算修剪数量
         n_prune = n_before - n_after
@@ -1035,4 +1036,6 @@ class GaussianModel:
             _, indices = torch.topk(out_weights_acc, n_prune, largest=False)
             # 权重值最小的 n_prune 的高斯点序号在布尔掩码张量中标记为 True，表示需要修剪
             prune_mask[indices] = True
+        print(prune_mask)
+        print(self.get_xyz.shape[0])
         return prune_mask

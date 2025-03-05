@@ -76,7 +76,6 @@ class Camera(nn.Module):
     
     # update opt cam and light
     # 根据 cam_pose_adj 可训练参数 优化相机外参
-
     def update(self, mode = "SO3xR3"):
         cam_opt_mat = None
         if mode == "SO3xR3":

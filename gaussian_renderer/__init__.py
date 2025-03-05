@@ -44,8 +44,13 @@ def render(viewpoint_camera,
     Background tensor (bg_color) must be on GPU!
     """
 
-    # 根据当前 相机信息 计算 光栅化参数:
+    # 1）光源方向的高斯泼溅 ———— 光栅化参数计算工作:
 
+    """ 
+    1. 焦距随着距离成比例缩放
+    2. 这里将光源作为一个相机
+    3. 因此通过计算光源和相机的距离比，来缩放得到光源的 焦距
+    """
     # 计算相机的原始焦距: f = \frac{W}{2 \tan(\frac{\text{FoV}}{2})}
     # Set up rasterization configuration
     if simplify:
@@ -65,11 +70,6 @@ def render(viewpoint_camera,
     f_scale_ratio = np.sqrt(np.sum(light_position * light_position) / np.sum(camera_position * camera_position))
     
     # 计算光源的焦距
-    """ 
-    1. 焦距随着距离成比例缩放
-    2. 这里将光源作为一个相机
-    3. 因此通过计算光源和相机的距离比，来缩放得到光源的 焦距
-    """
     fx_far = fx_origin * f_scale_ratio
     fy_far = fy_origin * f_scale_ratio
     
@@ -93,7 +93,7 @@ def render(viewpoint_camera,
 
 
 
-    # 1）光源方向的高斯泼溅 ———— 视角转换准备工作: 
+    # 2）光源方向的高斯泼溅 ———— 视角转换准备工作: 
 
     # 用于计算 shadow （shadow splatting）
     # 计算 世界坐标系 到 光源坐标系 的变换矩阵
@@ -128,7 +128,7 @@ def render(viewpoint_camera,
 
 
 
-    # 2）光源方向的高斯泼溅 ———— 高斯场景准备工作: 
+    # 3）光源方向的高斯泼溅 ———— 高斯场景准备工作: 
     # 1）视角方向的高斯泼溅 ———— 高斯场景准备工作:
 
     # 获得高斯点的 3D坐标、透明度、并初始化 2D坐标
@@ -243,7 +243,7 @@ def render(viewpoint_camera,
                 ！！！为什么不用 softplus 函数？
                     - 因为 点乘 的范围最小值为 -1，因此 elu 的输出最小值为 0.01 * (exp(-1) - 1) = -0.069，在后面使用正的 tmp 来修正，从而实现值域大于等于 0
                     - 而 -1 在 softplus 中，输出为 0.318，显然太大了，因此使用 elu 更合理，当然也可以使用负的 tmp 来修正
-                    - 而且 elu 可以对负数部分 用 α 来进一步调整，而 softplus 不能
+                    - 而且 elu 可以对负数部分 用 alpha 来进一步调整，而 softplus 不能
                 """
                 cosTheta = _NdotWi(local_z, wi, torch.nn.ELU(alpha=0.01), 0.01)     # local_z, wi 都是朝外的，方向一致
                 diffuse = gau.get_kd / math.pi
@@ -269,6 +269,7 @@ def render(viewpoint_camera,
             
             # 神经网络优化 shadow 和 其他效果
             # neural components
+            # 前期这里的得到的 shadow 和 other_effects 都是 0，因为此时没有开启神经网络优化
             decay, other_effects = gau.neural_phasefunc(wi, wo, gau.get_xyz, gau.get_neural_material, shadow.unsqueeze(-1)) # (N, 1), (N, 3)
             
             # combine all components，按通道拼接，等待传入视角方向的高斯泼溅

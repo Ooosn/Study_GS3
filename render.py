@@ -22,8 +22,9 @@ from arguments import ModelParams, PipelineParams, get_combined_args
 from gaussian_renderer import GaussianModel
 from scene.neural_phase_function import Neural_phase
 from scene.mixture_ASG import Mixture_of_ASG
+from utils.system_utils import searchForMaxIteration
 
-def render_set(model_path, name, iteration, views, gaussians, pipeline, background, gamma):
+def render_set(model_path, name, iteration, views, gaussians, pipeline, background, gamma, write_image=False):
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
     gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
 
@@ -39,14 +40,18 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
     
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         render_pkg = render(view, gaussians, light_stream, calc_stream, local_axises, asg_scales, asg_axises, pipeline, background)
-        rendering = render_pkg["render"] * render_pkg["shadow"] + render_pkg["other_effects"]
+        rendering = render_pkg["shadow"]
+        # render_pkg["render"] 
+        # * render_pkg["shadow"]   # 存在一些内存泄漏
+        # + render_pkg["other_effects"]
         gt = view.original_image[0:3, :, :]
-
-        if gamma:
-            gt = torch.pow(gt, 1/2.2)
-            rendering = torch.pow(rendering, 1/2.2)
-        torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
-        torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
+        
+        if write_image:
+            if gamma:
+                gt = torch.pow(gt, 1/2.2)
+                rendering = torch.pow(rendering, 1/2.2)
+            torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
+            torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
 
 def render_sets(dataset : ModelParams, 
                 iteration : int, 
@@ -55,16 +60,20 @@ def render_sets(dataset : ModelParams,
                 skip_test : bool, 
                 opt_pose: bool, 
                 gamma: bool,
-                valid: bool):
+                valid: bool,
+                write_image: bool):
     dataset.data_device = "cpu"
+
     if opt_pose:
         dataset.source_path = os.path.join(dataset.model_path, f'point_cloud/iteration_{iteration}')
 
     with torch.no_grad():
         gaussians = GaussianModel(dataset.sh_degree, dataset.use_nerual_phasefunc, basis_asg_num=dataset.basis_asg_num)
-        scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False, valid=valid)
+        scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False, valid=valid, skip_train=skip_train, skip_test=skip_test)
         
         if dataset.use_nerual_phasefunc:
+            if iteration == -1:
+                iteration = searchForMaxIteration(os.path.join(dataset.model_path, "point_cloud"))
             _model_path = os.path.join(dataset.model_path, f"chkpnt{iteration}.pth")
             if os.path.exists(_model_path):
                 (model_params, first_iter) = torch.load(_model_path)
@@ -86,28 +95,39 @@ def render_sets(dataset : ModelParams,
         bg_color = [1, 1, 1, 1, 0, 0, 0] if dataset.white_background else [0, 0, 0, 0, 0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
         
+        if valid:
+            print("valid")
+            render_set(dataset.model_path, "valid", scene.loaded_iter, scene.getValidCameras(), 
+                       gaussians, pipeline, background, gamma, write_image=True)
+        
         if not skip_train:
-            render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipeline, background, gamma)
+            print("train")
+            render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), 
+                       gaussians, pipeline, background, gamma, write_image=True)
 
         if not skip_test:
-            render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background, gamma)
-
+            print("test")
+            render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), 
+                       gaussians, pipeline, background, gamma, write_image=True)
+            
 if __name__ == "__main__":
     # Set up command line argument parser
     parser = ArgumentParser(description="Testing script parameters")
     model = ModelParams(parser, sentinel=True)
     pipeline = PipelineParams(parser)
-    parser.add_argument("--iteration", default=-1, type=int)
+    parser.add_argument("--load_iteration", default=-1, type=int)   # -1 代表加载最新的模型
     parser.add_argument("--skip_train", action="store_true")
     parser.add_argument("--skip_test", action="store_true")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--gamma", action="store_true", default=False)
     parser.add_argument("--opt_pose", action="store_true", default=False)
     parser.add_argument("--valid", action="store_true", default=False)
+    parser.add_argument("--write_image", action="store_true", default=False)
     args = get_combined_args(parser)
+    args.wang_debug = False
 
     # Initialize system state (RNG)
     safe_state(args.quiet)
 
-    render_sets(model.extract(args), args.iteration, pipeline.extract(args), \
-                args.skip_train, args.skip_test, args.opt_pose, args.gamma, args.valid)
+    render_sets(model.extract(args), args.load_iteration, pipeline.extract(args), \
+                args.skip_train, args.skip_test, args.opt_pose, args.gamma, args.valid, args.write_image)

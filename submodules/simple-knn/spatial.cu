@@ -12,6 +12,14 @@
 #include "spatial.h"
 #include "simple_knn.h"
 
+"""
+C++ 支持跨行 定义函数返回的数据结构，因为
+  C++ 在解析代码时，会忽略换行符（空白字符），只关心：
+    语法结构
+    分号 
+    大括号 {}
+"""
+
 torch::Tensor
 distCUDA2(const torch::Tensor& points)
 {

@@ -1000,7 +1000,7 @@ class GaussianModel:
     def add_densification_stats(self, viewspace_point_tensor, update_filter, width, height, out_weights):
         # 这里的梯度是 2D 梯度，即每一个视角高斯球映射后的椭圆的 x,y 方向的梯度 
         grad = viewspace_point_tensor.grad.squeeze(0) # [N, 2]
-        # Normalize the gradient to [-1, 1] screen size
+        # 根据图片尺寸修正梯度
         grad[:, 0] *= width * 0.5
         grad[:, 1] *= height * 0.5
         # 将梯度累加到累积梯度张量中，并更新累积次数，用于后续修建中的归一化
@@ -1015,6 +1015,7 @@ class GaussianModel:
         """
         # 将权重累加到累积权重张量中
         self.out_weights_accum += out_weights
+        print(out_weights.sum())
     
     """
     函数：传入权重累加器，决定修剪哪些高斯点

@@ -48,7 +48,9 @@ class Scene:
                  load_iteration=None, 
                  shuffle=True, 
                  resolution_scales=[1.0], 
-                 valid=False):
+                 valid=False,
+                 skip_train=False,
+                 skip_test=False,):
         """b
         args: Parameters for the model, including paths and configurations.
         gaussians: The Gaussian model for the scene.
@@ -63,6 +65,9 @@ class Scene:
 
         self.loaded_iter = None
         self.gaussians = gaussians
+        self.valid = valid
+        self.skip_train = skip_train
+        self.skip_test = skip_test
 
         # 判断是否需要加载已训练的模型
         # -1 代表加载最新的模型
@@ -76,6 +81,7 @@ class Scene:
 
         self.train_cameras = {}
         self.test_cameras = {}
+        self.valid_cameras = {}
         
         # 无论是否加载已训练的模型，都需要加载场景数据集
         # 仅判断是否存在transforms_train.json文件，如果存在则认为是Blender数据集，随后在sceneLoadTypeCallbacks中调用Blender函数加载训练和测试集的相机信息
@@ -91,14 +97,15 @@ class Scene:
             """
             if not args.wang_debug:
                 scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval, args.view_num, \
-                                                           valid=valid, extension=".exr" if args.hdr else ".png")
+                                                           valid=valid, skip_train=skip_train, skip_test=skip_test,
+                                                           extension=".exr" if args.hdr else ".png")
         else:
             assert False, "Could not recognize scene type!"
 
         # 场景信息部分
         # 如果不加载已训练的模型，则进行初始化
         # 1. 将点云文件拷贝到新建的模型文件夹下。
-        # 2. 准备训练签的相机信息，将相机信息写入到 cameras.json 文件中
+        # 2. 准备 训练/渲染 的相机信息，统一将相机信息写入到 cameras.json 文件中
         if not self.loaded_iter:
             with open(scene_info.ply_path, 'rb') as src_file, open(os.path.join(self.model_path, "input.ply") , 'wb') as dest_file:
 
@@ -111,17 +118,21 @@ class Scene:
                 camlist.extend(scene_info.test_cameras)
             if scene_info.train_cameras:
                 camlist.extend(scene_info.train_cameras)
+            if scene_info.valid_cameras:
+                camlist.extend(scene_info.valid_cameras)
             for id, cam in enumerate(camlist):
                 json_cams.append(camera_to_JSON(id, cam))
             with open(os.path.join(self.model_path, "cameras.json"), 'w') as file:
                 json.dump(json_cams, file)
 
-        
-        if shuffle:
-            random.shuffle(scene_info.train_cameras)  # Multi-res consistent random shuffling
-            random.shuffle(scene_info.test_cameras)  # Multi-res consistent random shuffling
+        # 判断是否处于渲染可视化阶段，如果处于，不需要以下信息
+        if not valid:
+            if shuffle:
+                random.shuffle(scene_info.train_cameras)  # Multi-res consistent random shuffling
+                random.shuffle(scene_info.test_cameras)  # Multi-res consistent random shuffling
 
-        self.cameras_extent = scene_info.nerf_normalization["radius"]
+            self.cameras_extent = scene_info.nerf_normalization["radius"]
+
 
         # 按照缩放比例分类，默认只有原始分辨率
         # 并且在此过程中，返回 相机 nn.module 对象 列表 ———— 特别是（每个 相机 对象中有）:
@@ -130,18 +141,27 @@ class Scene:
         # 因此后面可以直接将这两个参数传入 优化器 torch.optim.Adam
         # 将之前的 scene_info 中的相机信息，按照缩放比例调整参数，返回 Camera 对象列表
         """
-            Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
-                  FoVx=cam_info.FovX, FoVy=cam_info.FovY, cx=cam_cx, cy=cam_cy,
-                  image=gt_image, gt_alpha_mask=loaded_mask,
-                  pl_pos=cam_info.pl_pos, pl_intensity=cam_info.pl_intensity,
-                  image_name=cam_info.image_name, uid=id, data_device=args.data_device, 
-                  is_hdr=args.hdr, image_path=cam_info.image_path)
+        Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
+            FoVx=cam_info.FovX, FoVy=cam_info.FovY, cx=cam_cx, cy=cam_cy,
+            image=gt_image, gt_alpha_mask=loaded_mask,
+            pl_pos=cam_info.pl_pos, pl_intensity=cam_info.pl_intensity,
+            image_name=cam_info.image_name, uid=id, data_device=args.data_device, 
+            is_hdr=args.hdr, image_path=cam_info.image_path)
         """
-        for resolution_scale in resolution_scales:
-            print("Loading Training Cameras")
-            self.train_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.train_cameras, resolution_scale, args)
-            print("Loading Test Cameras")
-            self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, args)
+        if valid:
+            print("Loading Valid Cameras")
+            for resolution_scale in resolution_scales:
+                self.valid_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.valid_cameras, resolution_scale, args)   
+                
+        if not self.skip_train:
+            for resolution_scale in resolution_scales:
+                print("Loading Training Cameras")
+                self.train_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.train_cameras, resolution_scale, args)
+        
+        elif not self.skip_test:
+            for resolution_scale in resolution_scales:
+                print("Loading Test Cameras")
+                self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, args)
 
         
         # 高斯部分
@@ -166,7 +186,7 @@ class Scene:
 
         self.save_scale = 1.0
 
-        if opt is not None:     #opt应该是肯定存在的，除非出了问题，没太懂这里的条件判断
+        if opt is not None:     # 仅在训练时存在opt，渲染时不需要考虑这一部分
 
             # optimizer for camera and light
             # get_expon_lr_func: 根据迭代次数，衰减步数以及延迟系数生成一个指数衰减的学习率函数
@@ -311,3 +331,7 @@ class Scene:
     # 返回指定 resolution scale 下的测试集相机信息
     def getTestCameras(self, scale=1.0):
         return self.test_cameras[scale]
+    
+    # 返回指定 resolution scale 下的验证集相机信息
+    def getValidCameras(self, scale=1.0):
+        return self.valid_cameras[scale]

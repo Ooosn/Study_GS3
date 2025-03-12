@@ -45,12 +45,14 @@ class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
     train_cameras: list
     test_cameras: list
+    valid_cameras: list
     nerf_normalization: dict
     ply_path: str
 
 """
-函数：接受一组相机信息，通过相机信息计算场景的几何中心，并相机到中心的最大距离，从而用一个球包裹整个场景
-返回：场景的包围球（bounding sphere）的中心以及半径
+函数: 接受一组相机信息，进行归一化处理: 1. 处理场景的包围球（bounding sphere）的中心以及半径
+                                     2. 处理相机坐标系标准化（使相机坐标系相机放置在原点，朝向 Z 轴正方向）的平移矩阵
+返回: 场景的包围球（bounding sphere）的半径 以及 坐标系标准化平移矩阵
 """
 def getNerfppNorm(cam_info):
 
@@ -251,26 +253,38 @@ def readCamerasFromTransforms(path, transformsfile, white_background, view_num, 
             
     return cam_infos
 
-def readNerfSyntheticInfo(path, white_background, eval, view_num, valid=False, extension=".png"):
+def readNerfSyntheticInfo(path, white_background, eval, view_num, valid=False, skip_train=False, skip_test=False, extension=".png"):
     print("json path: ", path)
     if valid:
         # Only used for visualization, we use 400 frames for visualization
-        print("Reading Training Transforms")
-        train_cam_infos = readCamerasFromTransforms(path, "transforms_train.json", white_background, 400, extension)
         # Here actually don't provide the 400 real photos from different but continuous perspective 
-        print("Reading Test Transforms")
-        test_cam_infos = readCamerasFromTransforms(path, "transforms_valid.json", white_background, 400, extension)
+        print("Reading Valid Transforms")
+        valid_cam_infos = readCamerasFromTransforms(path, "transforms_valid.json", white_background, 400, extension)
+        train_cam_infos = []
+        test_cam_infos = []
+        if not skip_train:
+            print("Reading Training Transforms")
+            train_cam_infos = readCamerasFromTransforms(path, "transforms_train.json", white_background, view_num, extension)
+        if not skip_test:
+            print("Reading Test Transforms")
+            test_cam_infos = readCamerasFromTransforms(path, "transforms_test.json", white_background, view_num, extension)
     else:
         print("Reading Training Transforms")
         train_cam_infos = readCamerasFromTransforms(path, "transforms_train.json", white_background, view_num, extension)
-        print("Reading Test Transforms")
-        test_cam_infos = readCamerasFromTransforms(path, "transforms_test.json", white_background, view_num, extension)
+        if not skip_test:
+            print("Reading Test Transforms")
+            test_cam_infos = readCamerasFromTransforms(path, "transforms_test.json", white_background, view_num, extension)
 
     if not eval:
         train_cam_infos.extend(test_cam_infos)
         test_cam_infos = []
 
-    nerf_normalization = getNerfppNorm(train_cam_infos)
+    # 如果处于渲染可视化阶段，则不需要计算包围球
+    if valid:
+        nerf_normalization = []
+    else:
+        nerf_normalization = getNerfppNorm(train_cam_infos)
+        valid_cam_infos = []
 
     ply_path = os.path.join(path, "points3d.ply")
     if not os.path.exists(ply_path):
@@ -292,6 +306,7 @@ def readNerfSyntheticInfo(path, white_background, eval, view_num, valid=False, e
     scene_info = SceneInfo(point_cloud=pcd,
                            train_cameras=train_cam_infos,
                            test_cameras=test_cam_infos,
+                           valid_cameras=valid_cam_infos,
                            nerf_normalization=nerf_normalization,
                            ply_path=ply_path)
     return scene_info

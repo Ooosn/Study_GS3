@@ -48,9 +48,9 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         render_pkg = render(view, gaussians, light_stream, calc_stream, local_axises, asg_scales, asg_axises, pipeline, background)
         render_shadow = render_pkg["shadow"]
-        #render_other_effects = render_pkg["other_effects"]
-        #render_base = render_pkg["render"]
-        # rendering = render_pkg["render"]* render_pkg["shadow"] + render_pkg["other_effects"]
+        render_other_effects = render_pkg["other_effects"]
+        render_base = render_pkg["render"]
+        rendering = render_pkg["render"]* render_pkg["shadow"] + render_pkg["other_effects"]
         # render_pkg["render"] 
         # * render_pkg["shadow"]   # 存在一些内存泄漏
         # + render_pkg["other_effects"]
@@ -89,9 +89,22 @@ def render_sets(dataset : ModelParams,
         dataset.source_path = os.path.join(dataset.model_path, f'point_cloud/iteration_{iteration}')
 
     with torch.no_grad():
+
+        # load Gaussians attributes, establish scene
         gaussians = GaussianModel(dataset.sh_degree, dataset.use_nerual_phasefunc, basis_asg_num=dataset.basis_asg_num, asg_channel_num=dataset.asg_channel_num)
+        
+        # 创建场景实例
+        # iteration 为 -1 则加载最新的模型，否则加载指定迭代次数的模型，如果不存在则创建新的模型文件夹，但这里作为渲染，iteration 肯定要的哇
+        # valid 渲染验证集，skip_train 不渲染训练集，skip_test 不渲染测试集
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False, valid=valid, skip_train=skip_train, skip_test=skip_test)
         
+        """
+        本项目中: scene 中储存的 model 也就是 ply 文件，只存储了每个高斯的属性，不包括每个高斯的神经网络参数，以及公用的参数
+            因此需要先从 ply 文件中加载高斯模型参数，然后从 _model_path = os.path.join(dataset.model_path, f"chkpnt{iteration}.pth")
+                中提取神经网络参数和一些共用的参数（比如 asg 基函数参数）
+        这里的 model_path 是 模型文件夹，包括两个子模型，一个是 point_cloud; 一个是 chkpnt (torch.save(gaussians.capture()) 得到的文件)
+        point_cloud 中存储了高斯模型参数，chkpnt 中存储了优化器状态以及神经网络参数和一些共用的参数
+        """
         if dataset.use_nerual_phasefunc:
             if iteration == -1:
                 iteration = searchForMaxIteration(os.path.join(dataset.model_path, "point_cloud"))
@@ -144,6 +157,7 @@ if __name__ == "__main__":
     parser.add_argument("--opt_pose", action="store_true", default=False)
     parser.add_argument("--valid", action="store_true", default=False)
     parser.add_argument("--write_image", action="store_true", default=False)
+    # 加载训练模型所使用的参数
     args = get_combined_args(parser)
     args.wang_debug = False
 

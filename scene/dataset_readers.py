@@ -254,7 +254,9 @@ def readCamerasFromTransforms(path, transformsfile, white_background, view_num, 
     return cam_infos
 
 def readNerfSyntheticInfo(path, white_background, eval, view_num, valid=False, skip_train=False, skip_test=False, extension=".png"):
-    print("json path: ", path)
+    print("--------------------------------")
+    print("|      json path: ", path)
+    print("--------------------------------")
     if valid:
         # Only used for visualization, we use 400 frames for visualization
         # Here actually don't provide the 400 real photos from different but continuous perspective 

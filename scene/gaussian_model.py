@@ -110,6 +110,9 @@ class GaussianModel:
         self.spatial_lr_scale = 0
         self.setup_functions()
 
+        # debug 专用
+        self.global_call_counter = 0
+
     def capture(self):
         return (
             self.active_sh_degree,
@@ -1004,9 +1007,15 @@ class GaussianModel:
         """
         torch.logical_or 是逻辑或运算，用于筛选出满足至少一个条件的点，有 true 为 true
         """
+        self.global_call_counter += 1
         # 根据最终的修剪掩码，修剪高斯点
+        n_before = self.get_xyz.shape[0]
         self.prune_points(prune_mask)
-        
+        n_after = self.get_xyz.shape[0]
+        if self.global_call_counter % 20 == 0:  
+            print("densify_and_prune: ", n_before - n_after)
+            print("current: ", n_after)
+            self.global_call_counter = 0
         # 清空缓存
         # 这个密集化以及修剪过程中，产生了大量中间蟑螂，因此需要清空缓存
         torch.cuda.empty_cache()
@@ -1054,7 +1063,5 @@ class GaussianModel:
             _, indices = torch.topk(out_weights_acc, n_prune, largest=False)
             # 权重值最小的 n_prune 的高斯点序号在布尔掩码张量中标记为 True，表示需要修剪
             prune_mask[indices] = True
-        print(prune_mask)
-        print(n_before - n_after)
-        print(self.get_xyz.shape[0])
+            print("prune_visibility_mask: ", n_prune)
         return prune_mask

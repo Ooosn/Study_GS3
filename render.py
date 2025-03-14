@@ -56,7 +56,7 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
         # + render_pkg["other_effects"]
         gt = view.original_image[0:3, :, :]
         
-        if False:
+        if True:
             if gamma:
                 gt = torch.pow(gt, 1/2.2)
                 rendering = torch.pow(rendering, 1/2.2)

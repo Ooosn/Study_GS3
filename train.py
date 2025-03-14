@@ -40,7 +40,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     gaussians = GaussianModel(dataset.sh_degree, use_MBRDF=dataset.use_nerual_phasefunc, basis_asg_num=dataset.basis_asg_num, \
                             hidden_feature_size=dataset.phasefunc_hidden_size, hidden_feature_layer=dataset.phasefunc_hidden_layers, \
                             phase_frequency=dataset.phasefunc_frequency, neural_material_size=dataset.neural_material_size,
-                            maximum_gs=dataset.maximum_gs, channel_num=dataset.asg_channel_num)
+                            maximum_gs=dataset.maximum_gs, asg_channel_num=dataset.asg_channel_num)
 
     # 根据 训练args，优化args 以及 初始高斯 建立场景实例，最终的高斯实例
     """

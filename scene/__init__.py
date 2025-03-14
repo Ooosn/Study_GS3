@@ -42,7 +42,7 @@ class Scene:
     gaussians : GaussianModel
                           
     def __init__(self, 
-                 args : ModelParams,  # 传入模型参数，这里的args其实就是前文的 dataset
+                 args : ModelParams,  # 传入模型参数，这里的args其实就是前文的 dataset # args.data_device 可以为 cpu 或 cuda
                  gaussians : GaussianModel, 
                  opt=None, # opt ： OptimizationParams 类型，优化参数
                  load_iteration=None, 
@@ -175,6 +175,8 @@ class Scene:
         else: 
             # create_from_pcd 中，会初始化神经网络 self.neural_phasefunc = Neural_phase(
             self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
+
+
 
         # 优化部分
         # 判断是否需要优化相机参数和光源参数

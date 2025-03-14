@@ -52,11 +52,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     """
     scene = Scene(dataset, gaussians, opt=opt, shuffle=True)
     
-    # 初始化参数设置
+    # 按照 opt对象 初始化参数设置
     gaussians.training_setup(opt)
 
-    # 如果提供了检查点路径，则加载检查点的高斯参数
-    # 如果为 True ，会覆盖上面的  gaussians.training_setup(opt) 
+
+    # 恢复模型模型参数以及优化器状态，覆盖之前初始化的模型
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
@@ -101,8 +101,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         
     # initialize parallel GPU stream 多流并行
     # 有时会出现错误，可以尝试关闭，改为串行，torch.cuda.current_stream().synchronize()
-    light_stream = torch.cuda.current_stream()
-    calc_stream = torch.cuda.current_stream()
+    light_stream = torch.cuda.Stream()  # 创建新的 CUDA 流
+    calc_stream = torch.cuda.Stream()   # 创建另一个独立的 CUDA 流
+
     
     dddd = 0
 
@@ -400,6 +401,7 @@ def prepare_output_and_logger(args):
     # Set up output folder
     print("Output folder: {}".format(args.model_path))
     os.makedirs(args.model_path, exist_ok = True)
+    # 储存模型所使用的参数，用于后续查看以及渲染使用
     with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:
         cfg_log_f.write(str(Namespace(**vars(args))))
 
@@ -469,7 +471,7 @@ if __name__ == "__main__":
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
     parser.add_argument("--unfreeze_iterations", type=int, default=0)
     parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
+    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])     # -1 代表自动查询加载最新模型，其他数字则代表指定加载模型
     parser.add_argument("--start_checkpoint", type=str, default = None)
 
     # 令 args 包含 parser 中定义的所有参数的键和值

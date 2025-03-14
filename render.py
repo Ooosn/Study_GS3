@@ -9,6 +9,7 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+
 import torch
 from scene import Scene
 import os
@@ -23,6 +24,8 @@ from gaussian_renderer import GaussianModel
 from scene.neural_phase_function import Neural_phase
 from scene.mixture_ASG import Mixture_of_ASG
 from utils.system_utils import searchForMaxIteration
+from rich import print
+from rich.panel import Panel
 
 def render_set(model_path, name, iteration, views, gaussians, pipeline, background, gamma, write_image=False):
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
@@ -32,25 +35,43 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
     makedirs(gts_path, exist_ok=True)
 
     local_axises = gaussians.get_local_axis         # (K, 3, 3)
-    asg_scales = gaussians.asg_func.get_asg_lam_miu # (basis_asg_num, 2)
+    asg_scales = gaussians.asg_func.get_asg_lam_miu # (basis_asg_num, 2, channel_num)
     asg_axises = gaussians.asg_func.get_asg_axis    # (basis_asg_num, 3, 3)
         
     light_stream = torch.cuda.Stream()
     calc_stream = torch.cuda.Stream()
+    render_shadow = None
+    render_other_effects = None
+    render_base = None
+    rendering = None
     
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         render_pkg = render(view, gaussians, light_stream, calc_stream, local_axises, asg_scales, asg_axises, pipeline, background)
-        rendering = render_pkg["shadow"]
+        render_shadow = render_pkg["shadow"]
+        #render_other_effects = render_pkg["other_effects"]
+        #render_base = render_pkg["render"]
+        # rendering = render_pkg["render"]* render_pkg["shadow"] + render_pkg["other_effects"]
         # render_pkg["render"] 
         # * render_pkg["shadow"]   # 存在一些内存泄漏
         # + render_pkg["other_effects"]
         gt = view.original_image[0:3, :, :]
         
-        if write_image:
+        if False:
             if gamma:
                 gt = torch.pow(gt, 1/2.2)
                 rendering = torch.pow(rendering, 1/2.2)
-            torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
+            os.makedirs(os.path.join(render_path, 'shadow'), exist_ok=True)
+            os.makedirs(os.path.join(render_path, 'other_effects'), exist_ok=True)
+            os.makedirs(os.path.join(render_path, 'base'), exist_ok=True)
+            if render_shadow is not None:
+                if not os.path.exists(os.path.join(render_path, 'shadow', '{0:05d}'.format(idx) + ".png")):
+                    torchvision.utils.save_image(render_shadow, os.path.join(render_path, 'shadow', '{0:05d}'.format(idx) + ".png"))
+            if render_other_effects is not None:
+                torchvision.utils.save_image(render_other_effects, os.path.join(render_path, 'other_effects', '{0:05d}'.format(idx) + ".png"))
+            if render_base is not None:
+                torchvision.utils.save_image(render_base, os.path.join(render_path, 'base', '{0:05d}'.format(idx) + ".png"))
+            if rendering is not None:
+                torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
             torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
 
 def render_sets(dataset : ModelParams, 
@@ -68,7 +89,7 @@ def render_sets(dataset : ModelParams,
         dataset.source_path = os.path.join(dataset.model_path, f'point_cloud/iteration_{iteration}')
 
     with torch.no_grad():
-        gaussians = GaussianModel(dataset.sh_degree, dataset.use_nerual_phasefunc, basis_asg_num=dataset.basis_asg_num)
+        gaussians = GaussianModel(dataset.sh_degree, dataset.use_nerual_phasefunc, basis_asg_num=dataset.basis_asg_num, asg_channel_num=dataset.asg_channel_num)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False, valid=valid, skip_train=skip_train, skip_test=skip_test)
         
         if dataset.use_nerual_phasefunc:
@@ -78,7 +99,7 @@ def render_sets(dataset : ModelParams,
             if os.path.exists(_model_path):
                 (model_params, first_iter) = torch.load(_model_path)
                 # load ASG parameters
-                gaussians.asg_func = Mixture_of_ASG(dataset.basis_asg_num)
+                gaussians.asg_func = Mixture_of_ASG(dataset.basis_asg_num, dataset.asg_channel_num)
                 gaussians.asg_func.asg_sigma = model_params[8]
                 gaussians.asg_func.asg_rotation = model_params[9]
                 gaussians.asg_func.asg_scales = model_params[10]
@@ -126,6 +147,17 @@ if __name__ == "__main__":
     args = get_combined_args(parser)
     args.wang_debug = False
 
+    args_info = f"""
+    model_args: {vars(model.extract(args))}
+    load_iteration: {args.load_iteration}
+    skip_train: {args.skip_train}
+    skip_test: {args.skip_test}
+    opt_pose: {args.opt_pose}
+    gamma: {args.gamma}
+    valid: {args.valid}
+    """
+    
+    print(Panel(args_info, title="Arguments", expand=False))
     # Initialize system state (RNG)
     safe_state(args.quiet)
 

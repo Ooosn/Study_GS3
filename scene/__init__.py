@@ -158,7 +158,7 @@ class Scene:
                 print("Loading Training Cameras")
                 self.train_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.train_cameras, resolution_scale, args)
         
-        elif not self.skip_test:
+        if not self.skip_test:
             for resolution_scale in resolution_scales:
                 print("Loading Test Cameras")
                 self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, args)

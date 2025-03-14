@@ -471,7 +471,7 @@ if __name__ == "__main__":
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
     parser.add_argument("--unfreeze_iterations", type=int, default=0)
     parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])     # -1 代表自动查询加载最新模型，其他数字则代表指定加载模型
+    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])     # 存储的迭代次数列表
     parser.add_argument("--start_checkpoint", type=str, default = None)
 
     # 令 args 包含 parser 中定义的所有参数的键和值

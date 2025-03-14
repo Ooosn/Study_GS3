@@ -43,7 +43,6 @@ def render(viewpoint_camera,
     
     Background tensor (bg_color) must be on GPU!
     """
-
     # 1）光源方向的高斯泼溅 ———— 光栅化参数计算工作:
 
     """ 
@@ -155,35 +154,40 @@ def render(viewpoint_camera,
     # 3）光源方向的高斯泼溅 ———— 光源方向高斯泼溅信息计算: 
 
     # shadow splatting
-    light_stream.wait_stream(torch.cuda.current_stream())   # 等待计算完成，因为下面要使用新的流，且有依赖    
+    # light_stream.wait_stream(torch.cuda.current_stream())   # 等待计算完成，因为下面要使用新的流，且有依赖   
+
     with torch.no_grad():
         """
         !!! 阴影 shadow 从已有的高斯场景信息计算的，不是用来优化高斯本身，因此这里不能有梯度 
         """   
-        with torch.cuda.stream(light_stream):   # 在光源流中进行计算
-            rasterizer_light = GaussianRasterizer_light(raster_settings=raster_settings_light)
-            opacity_light = torch.zeros(scales.shape[0], dtype=torch.float32, device=scales.device)
-            _, out_weight, _, shadow = rasterizer_light(
-                means3D = means3D,
-                means2D = means2D,
-                shs = None,
-                colors_precomp = torch.zeros((2, 3), dtype=torch.float32, device=scales.device),
-                opacities = opacity,
-                scales = scales,
-                rotations = rotations,
-                cov3D_precomp = cov3D_precomp,
-                non_trans = opacity_light,
-                offset = 0.015,
-                thres = 4,
-                is_train = is_train)
-
-
+        # with torch.cuda.stream(light_stream):   # 在光源流中进行计算 # 撤销，有bug
+        """
+        !!! 怀疑 GaussianRasterizer_light 中的某些操作绑定了固定流，因此采用异步时，一些流可能绑定了新流，一些流依然在旧流中
+        !!! 因此出现 流竞争问题，后续需要改进
+        """
+        rasterizer_light = GaussianRasterizer_light(raster_settings=raster_settings_light)
+        opacity_light = torch.zeros(scales.shape[0], dtype=torch.float32, device=scales.device)
+        _, out_weight, _, shadow = rasterizer_light(
+            means3D = means3D,
+            means2D = means2D,
+            shs = None,
+            colors_precomp = torch.zeros((2, 3), dtype=torch.float32, device=scales.device),
+            opacities = opacity,
+            scales = scales,
+            rotations = rotations,
+            cov3D_precomp = cov3D_precomp,
+            non_trans = opacity_light,
+            offset = 0.015,
+            thres = 4,
+            is_train = is_train)
 
     # 4）光源方向的高斯泼溅 ———— ① 计算最终阴影 ② 计算其他效果 ③ 计算高斯点的最终颜色:
 
     # MBDRF 和 SH 的选择
     # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
     # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
+    
+
     shs = None
     colors_precomp = None
     if override_color is None:
@@ -246,8 +250,8 @@ def render(viewpoint_camera,
                     - 而且 elu 可以对负数部分 用 alpha 来进一步调整，而 softplus 不能
                 """
                 cosTheta = _NdotWi(local_z, wi, torch.nn.ELU(alpha=0.01), 0.01)     # local_z, wi 都是朝外的，方向一致
-                diffuse = gau.get_kd / math.pi
-                specular = gau.get_ks * gau.asg_func(wi_local, wo_local, gau.get_alpha_asg, asg_scales, asg_axises) # (K, 3)
+                diffuse = gau.get_kd / math.pi      # (N, 1)
+                specular = gau.get_ks * gau.asg_func(wi_local, wo_local, gau.get_alpha_asg, asg_scales, asg_axises) # (N, 3)
 
                 # 刚开始只考虑 漫反射，不考虑其他反射，优化高斯的基础颜色
                 if fix_labert:
@@ -258,9 +262,11 @@ def render(viewpoint_camera,
                 colors_precomp = colors_precomp * cosTheta * dist_2_inv
 
             # calc_stream.wait_stream(light_stream)
-            torch.cuda.current_stream().wait_stream(light_stream)
+
+
+            # 等待所有分流完成
+            # torch.cuda.current_stream().wait_stream(light_stream)  # 撤销，有bug
             torch.cuda.current_stream().wait_stream(calc_stream)
-            
             # shaodow splat values
             opacity_light = torch.clamp_min(opacity_light, 1e-6)    # 防止最小值为0，产生 NaN
             # 归一化阴影值，使其不受不透明度影响
@@ -315,7 +321,8 @@ def render(viewpoint_camera,
     # 2）视角方向的高斯泼溅 ———— 高斯场景泼溅:
 
     #（这里使用的 gsplat 库，没有用原装 3dgs 的库）
-    torch.cuda.synchronize()    # 等待所有流完成
+    torch.cuda.synchronize()
+     # 等待所有流完成
     # Rasterize visible Gaussians to image, obtain their radii (on screen). 
     # 传入之前根据光照角度得到的 colors_precomp，进行当前视角的高斯泼溅
     focalx = fov2focal(viewpoint_camera.FoVx, viewpoint_camera.image_width)

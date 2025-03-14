@@ -61,7 +61,8 @@ class GaussianModel:
                  hidden_feature_layer=3, 
                  phase_frequency=4, 
                  neural_material_size=6, 
-                 maximum_gs=1_000_000):
+                 maximum_gs=1_000_000,
+                 asg_channel_num=1):
         
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree  
@@ -76,6 +77,7 @@ class GaussianModel:
         
         # ASG params
         self.basis_asg_num = basis_asg_num
+        self.asg_channel_num = asg_channel_num
         self.alpha_asg = torch.empty(0)
         self.asg_func = torch.empty(0)
         
@@ -311,9 +313,10 @@ class GaussianModel:
             self.ks = nn.Parameter(ks.requires_grad_(True))
 
             # 基于 ASG (Anisotropic Spherical Gaussians)，混合多个 ASG 以逼近复杂的高光形状
-            alpha_asg = torch.zeros((features.shape[0], self.basis_asg_num), dtype=torch.float, device="cuda")
+            # 这里 channel_num 是 ASG 的通道数量，用于控制 ASG 的输出维度
+            alpha_asg = torch.zeros((features.shape[0], self.basis_asg_num, self.asg_channel_num), dtype=torch.float, device="cuda")
             self.alpha_asg = nn.Parameter(alpha_asg.requires_grad_(True))
-            self.asg_func = Mixture_of_ASG(self.basis_asg_num)  # forward(self, wi, wo, alpha_asg, asg_scales, asg_axises):
+            self.asg_func = Mixture_of_ASG(self.basis_asg_num, self.asg_channel_num)  # forward(self, wi, wo, alpha_asg, asg_scales, asg_axises):
             
             # 局部旋转四元数（修正 wi 和 wo）
             local_rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
@@ -431,8 +434,9 @@ class GaussianModel:
                 l.append('kd_{}'.format(i))
             for i in range(self.ks.shape[1]):
                 l.append('ks_{}'.format(i))
-            for i in range(self.alpha_asg.shape[1]):
-                l.append('alpha_asg_{}'.format(i))
+            for channel in range(self.alpha_asg.shape[2]):
+                for basis in range(self.alpha_asg.shape[1]):
+                    l.append('alpha_asg_{}_{}'.format(basis, channel))
             for i in range(self.local_q.shape[1]):
                 l.append('local_q_{}'.format(i))
             for i in range(self.neural_material.shape[1]):
@@ -490,16 +494,17 @@ class GaussianModel:
             np.concatenate: 将数据组合按 axis 拼接
             """
             attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation, \
-                                        kd, ks, alpha_asg, local_q, neural_material), axis=1)
+                                        kd, ks, alpha_asg[:, :, 0], alpha_asg[:, :, 1], alpha_asg[:, :, 2], local_q, neural_material), axis=1)
         else:
             attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
 
         # 创建 ply 数据:
         # map(tuple, attributes) 返回一个迭代器，它会 逐行 把 attributes 的数据转换为 tuple 。
+        # 即每个 tuple 是一个 高斯点 的 所有属性
         """
         map(tuple, attributes): [tuple(row) for row in attributes]
+        list(...): 把迭代器展开成一个 Python 列表，使其可以被 elements[:] 正确赋值，列表 赋 列表
         """ 
-		# list(...) 把这个迭代器展开成一个 Python 列表，使其可以被 elements[:] 正确赋值
         # elements[i] 需要和 dtype_full 结构匹配，因此 attributes[i]/attributes每一行 的元素个数以及顺序必须 完全等于 dtype_full 里定义的字段数量
         # Numpy 自定义数据结构赋值要求使用 tuple ，这样 NumPy 才能正确解析数据格式
         elements[:] = list(map(tuple, attributes))
@@ -528,6 +533,14 @@ class GaussianModel:
         无返回，加载储存的数据，并以 self 的形式储存，
     """
     def load_ply(self, path):
+        """
+        Plydata: 
+        plydata.elements: 代表文件中所有元素，每个元素是一个 PlyElement 对象，代表一个数据表
+        plydata.elements[0]: 则代表 第一个数据表，即 我们的点云数据表
+        plydata.elements[0].properties: 则代表 点云数据表 中的 所有属性
+        虽然存储时是按行存储的，但读取时，对于每一个属性，会自动读取所有点的该属性，并返回一个 Numpy 数组
+            例如: plydata.elements[0]["x"] 会返回所有点的 x 坐标数据
+        """
         plydata = PlyData.read(path)
 
         xyz = np.stack((np.asarray(plydata.elements[0]["x"]),
@@ -563,11 +576,17 @@ class GaussianModel:
                 ks[:, idx] = np.asarray(plydata.elements[0][attr_name])
                 
             alpha_asg_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("alpha_asg_")]
-            alpha_asg_names = sorted(alpha_asg_names, key = lambda x: int(x.split('_')[-1]))
-            assert len(alpha_asg_names) == self.basis_asg_num
-            alpha_asg = np.zeros((xyz.shape[0], len(alpha_asg_names)))
-            for idx, attr_name in enumerate(alpha_asg_names):
-                alpha_asg[:, idx] = np.asarray(plydata.elements[0][attr_name])
+            # 先按 Basis dim = 1 排序，再按 channel dim = 2 排序
+            alpha_asg_names = sorted(alpha_asg_names, key = lambda x: (int(x.split('_')[-2]), int(x.split('_')[-1])))
+            print(len(alpha_asg_names))
+            print(self.basis_asg_num)
+            print(self.asg_channel_num)
+            assert len(alpha_asg_names) == self.basis_asg_num * self.asg_channel_num
+            
+            alpha_asg = np.zeros((xyz.shape[0], self.basis_asg_num, self.asg_channel_num))
+            for attr_name in alpha_asg_names:
+                basis, channel = map(int, attr_name.split('_')[-2:])  # 解析通道索引 j 和 Basis 索引 i
+                alpha_asg[:, basis, channel] = np.asarray(plydata.elements[0][attr_name])  # 赋值到正确位置
                 
             local_q_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("local_q_")]
             local_q_names = sorted(local_q_names, key = lambda x: int(x.split('_')[-1]))
@@ -659,7 +678,7 @@ class GaussianModel:
                 # 优化器在之前为这个参数创建了状态，需要删除旧的状态，
                 """
                 为什么需要删除旧的状态？  
-                    1. 因为在 state 字典中，字典的 key 是参数的地址，而参数的地址在参数组中是唯一的，因此需要删除旧的状态，
+                    1. 因为在 state 字典中，字典的 key 是参数的地址，value 是参数的状态信息，
                     2. group["params"][0] = nn.Parameter((group... 这一步，group["params"][0] 的地址发生了变化，
                     2. 因此即便后续我们通过 self.optimizer.state[group['params'][0]] = stored_state 更新状态，会添加新的键值对，
                     3. 字典中依然会存在旧的状态，这会浪费内存，甚至有可能导致一些更严重的后果（比如说遍历状态集，或者做一些运算用到状态集）
@@ -670,6 +689,7 @@ class GaussianModel:
                 # 对齐/更新状态，添加键值对：新地址：新状态
                 self.optimizer.state[group['params'][0]] = stored_state
 
+                # 将更新后的参数组添加到 optimizable_tensors 字典中
                 optimizable_tensors[group["name"]] = group["params"][0]
 
             # 如果状态不存在，则直接初始化
@@ -880,7 +900,7 @@ class GaussianModel:
         new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
         new_kd = None if not self.use_MBRDF else self.kd[selected_pts_mask].repeat(N,1)
         new_ks = None if not self.use_MBRDF else self.ks[selected_pts_mask].repeat(N,1)
-        new_alpha_asg = None if not self.use_MBRDF else self.alpha_asg[selected_pts_mask].repeat(N,1)
+        new_alpha_asg = None if not self.use_MBRDF else self.alpha_asg[selected_pts_mask].repeat(N,1,1)
         new_local_q = None if not self.use_MBRDF else self.local_q[selected_pts_mask].repeat(N,1)
         new_neural_material = None if not self.use_MBRDF else self.get_neural_material[selected_pts_mask].repeat(N,1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
@@ -962,7 +982,6 @@ class GaussianModel:
         padded_out_weights[:out_weights_acc.shape[0]] = out_weights_acc.squeeze()   
         # 将新加入的点权重赋值给 padded_out_weights 张量，统一赋值为原本权重累加器中的最大权重
         padded_out_weights[out_weights_acc.shape[0]:] = torch.max(out_weights_acc)
-        print(padded_out_weights)
 
         # 1）透明度修剪掩码
         # 计算透明度过低所导致的修剪掩码，将所有点的透明度与最小透明度进行比较，小于最小透明度的点为 True，否则为 False
@@ -1015,7 +1034,6 @@ class GaussianModel:
         """
         # 将权重累加到累积权重张量中
         self.out_weights_accum += out_weights
-        print(out_weights.sum())
     
     """
     函数：传入权重累加器，决定修剪哪些高斯点
@@ -1023,7 +1041,6 @@ class GaussianModel:
     """    
     def prune_visibility_mask(self, out_weights_acc):
         n_before = self.get_xyz.shape[0]    # 当前高斯点数量，可能由于密集化产生变化
-        print(n_before)
         n_after = self.maximum_gs   # 最大高斯点数量，由自己设置
         # 计算修剪数量
         n_prune = n_before - n_after
@@ -1038,5 +1055,6 @@ class GaussianModel:
             # 权重值最小的 n_prune 的高斯点序号在布尔掩码张量中标记为 True，表示需要修剪
             prune_mask[indices] = True
         print(prune_mask)
+        print(n_before - n_after)
         print(self.get_xyz.shape[0])
         return prune_mask

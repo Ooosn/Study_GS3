@@ -72,11 +72,18 @@ class ModelParams(ParamGroup):
         self.pl_opt= True
         # maximum gaussian number
         self.maximum_gs = 550_000
+
+
+        """
+        mine
+        """
         # save time for debug
         self.wang_debug = False
+        self.asg_channel_num = 1
 
         super().__init__(parser, "Loading Parameters", sentinel)
 
+    # 提取出经过命令行参数修改后的参数
     def extract(self, args):
         g = super().extract(args)
 

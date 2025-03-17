@@ -29,6 +29,9 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
 
+
+asgmlp_debug = True
+
 #training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.unfreeze_iterations, args.debug_from)
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, unfreeze_iterations, debug_from):
     first_iter = 0
@@ -40,7 +43,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     gaussians = GaussianModel(dataset.sh_degree, use_MBRDF=dataset.use_nerual_phasefunc, basis_asg_num=dataset.basis_asg_num, \
                             hidden_feature_size=dataset.phasefunc_hidden_size, hidden_feature_layer=dataset.phasefunc_hidden_layers, \
                             phase_frequency=dataset.phasefunc_frequency, neural_material_size=dataset.neural_material_size,
-                            maximum_gs=dataset.maximum_gs, asg_channel_num=dataset.asg_channel_num)
+                            maximum_gs=dataset.maximum_gs, asg_channel_num=dataset.asg_channel_num, asg_mlp=dataset.asg_mlp, \
+                            mlp_zero=opt.mlp_zero)
 
     # 根据 训练args，优化args 以及 初始高斯 建立场景实例，最终的高斯实例
     """
@@ -95,6 +99,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     # 根据当前迭代次数，决定是否冻结相位函数
     phase_func_freezed = False
     asg_freezed = True
+    asg_mlp = False
+
     if first_iter < unfreeze_iterations:
         gaussians.neural_phasefunc.freeze()
         phase_func_freezed = True
@@ -130,7 +136,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if iteration % 1000 == 0:
             if not dataset.use_nerual_phasefunc:
                 gaussians.oneupSHdegree()
-                
+        
+        # 在早期训练时，冻结 asg 参数，快速收敛
+        # 但是并没有冻结 asg_sigma，为了先获得一个基础的 高光形状，并未考虑拟合复杂的高光形状
         if iteration <= opt.asg_freeze_step:
             gaussians.asg_func.asg_scales.requires_grad_(False)
             gaussians.asg_func.asg_rotation.requires_grad_(False)
@@ -177,7 +185,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         # only opt with diffuse term at the beginning for a stable training process
         if iteration < opt.spcular_freeze_step + opt.fit_linear_step:   # 只考虑漫反射，不考虑镜面反射，刚开始训练时，先优化漫反射，赋予每个高斯点一个基础颜色
-            render_pkg = render(viewpoint_cam, gaussians, light_stream, calc_stream, local_axises, asg_scales, asg_axises, pipe, bg, fix_labert=True, is_train=prune_visibility)
+            render_pkg = render(viewpoint_cam, gaussians, light_stream, calc_stream, local_axises, asg_scales, asg_axises, pipe, bg, fix_labert=True, is_train=prune_visibility, asg_mlp = asg_mlp)
         else:    # 开始考虑镜面反射             
             render_pkg = render(viewpoint_cam, gaussians, light_stream, calc_stream, local_axises, asg_scales, asg_axises, pipe, bg, is_train=prune_visibility)
         
@@ -199,11 +207,26 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         """！！Loss部分"""
         # 获取真实图片数据
         gt_image = viewpoint_cam.original_image.cuda()
-        # 根据图片格式，进行调整
+        
+        """
+        · HDR 线性空间的数值直接表示物理光照强度，例如：
+            - 一个非常亮的像素可能是 100.0。
+            - 一个较暗的像素可能是 0.1。
+        · 在计算机存储 HDR 数据时，它们的数值比例是线性的：
+            - 亮部（100.0）比暗部（0.1）大 1000 倍。
+        · 这种极大的动态范围，使得暗部在数据中几乎看不见，而亮部占据主导。
+        · 人眼感知不是线性的，对暗部更敏感，对亮部的变化不敏感。
+        · 如果直接显示 HDR 线性数据，亮部会过曝，而暗部基本不可见。
+        ~ 因此，需要进行 Gamma 校正，将 HDR 线性数据转换为 非线性空间，使得人眼更容易区分 100 和 1000 之间的亮度差异。
+        """
+        # 初始阶段，固定 Gamma，使数据更接近 sRGB 颜色分布，避免大范围的数值差异带来的过曝，暗部细节丢失
+        # 第二阶段逐步调整 Gamma 使其趋近于 1，让网络逐步适应 HDR 线性数据，而不是突然切换，避免网络过早收敛到错误的分布
         if dataset.hdr:
             if iteration <= opt.spcular_freeze_step:
                 gt_image = torch.pow(gt_image, 1./2.2)
             elif iteration < opt.spcular_freeze_step + opt.fit_linear_step//2:
+                # 慢慢从 2.2 转换到 1.1 ，why not 1.0?
+                # 当 iteration 大于  opt.spcular_freeze_step + opt.fit_linear_step//2 后，则直接使用原 gt_image，即 gamma 为 1
                 gamma = 1.1 * float(opt.spcular_freeze_step + opt.fit_linear_step - iteration + 1) / float(opt.fit_linear_step // 2 + 1)
                 gt_image = torch.pow(gt_image, 1./gamma)
         else:
@@ -258,9 +281,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     """
                     # 更新相机参数和光源参数
                     scene.optimizer.step()
-                    if iteration % 1000 == 0:
-                        print(scene.optimizer.param_groups[0]['params'][0].grad)
-                        print(scene.optimizer.param_groups[0]['params'][1].grad)
                     # 梯度清零
                     scene.optimizer.zero_grad(set_to_none = True)
                     # 梯度清零
@@ -361,34 +381,95 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             2. 抵达 unfreeze_iterations 时，解冻 高斯点相位函数，开始优化 阴影，材质，次要效果等
             3. 抵达 spcular_freeze_step 时，冻结 高斯点相位函数，再次只优化漫反射 kd
             4. 抵达spcular_freeze_step + fit_linear_step 之后，解冻 高斯点相位函数，并同时开始同时优化镜面反射 ks
+            
+            总结：
+            初期冻结相位函数：训练场景空间为主，
+            然后解冻相位函数：获得一个基础的阴影和次要效果，
+            然后冻结相位函数，专注于优化漫反射: 在此期间，如果图片为 hdr 格式，则 逐渐调整 gamma 值，逐步转换到 线性空间，防止过曝，暗部细节丢失
+            当抵达 opt.spcular_freeze_step + opt.fit_linear_step 时：开始全面优化，包括 相变函数，包括镜面反射，
+                - 但此时 asg 部分参数（scale，rotation）还未解冻，取决于 asg_freeze_step (22000)
+                - asg 参数只优化 sigma，不优化各向异性参数
+            当抵达 asg_freeze_step 时：解冻 asg 各向异性参数，开始优化 asg 各向异性参数
             """
-            # 初期默认冻结 高斯点相位函数（负责处理光照相关的相位特性（如材质、阴影、次要效果等））
+            # 高斯点相位函数（负责处理光照相关的相位特性（如材质、阴影、次要效果等））
             # 判断是否解冻 高斯点相位函数，解冻后该函数失效，由下列代码接管
-            if phase_func_freezed and iteration >= unfreeze_iterations:
+            if phase_func_freezed and iteration >= unfreeze_iterations: # 5000
                 gaussians.neural_phasefunc.unfreeze()
                 phase_func_freezed = False
+                print(1)
 
-            # 抵达 spcular_freeze_step 时：开始优化相变函数，但依然只考虑 漫反射
-            if iteration == opt.spcular_freeze_step:
+            # 抵达 spcular_freeze_step 时：冻结相变函数，但依然只考虑 漫反射
+            """
+            如果 图片 为 hdr 格式，则 逐渐调整 gamma 值，逐步转换到 线性空间，防止过曝，暗部细节丢失
+            """
+            if iteration == opt.spcular_freeze_step: # 9000
                 gaussians.neural_phasefunc.freeze()
                 gaussians.neural_material.requires_grad_(False)
 
-            # spcular_freeze_step + fit_linear_step 之后：开始同时优化 镜面反射 和 漫反射
-            if iteration == opt.spcular_freeze_step + opt.fit_linear_step:
+            # spcular_freeze_step + fit_linear_step 之后：解冻相变函数，并开始同时优化 镜面反射 和 漫反射
+            if iteration == opt.spcular_freeze_step + opt.fit_linear_step: # 15000
                 gaussians.neural_phasefunc.unfreeze()
                 gaussians.neural_material.requires_grad_(True)
+                print(2)
 
             # 判断是否保存模型
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+            
+            if dataset.asg_mlp and iteration == opt.asg_mlp_freeze: # 40000
+                asg_mlp = True
+            
+            elif dataset.alpha_change and iteration == opt.asg_mlp_freeze:
+                gaussians.start_alpha_asg(gaussians.get_alpha_asg)
+                print("alpha changed")
 
+
+            if asgmlp_debug:
+                if iteration % 2000 == 0:
+                    print_params(gaussians)
+                    print("alpha.shape", gaussians.get_alpha_asg.shape)
+                    print("alpha", gaussians.get_alpha_asg)
 
         # 更新相机和光源参数：（之前只是更新了 adj 参数，尚未对相机和光源进行直接更新)，注意这里没有设置 torch.no_grad()
         # update cam and light
         if scene.optimizing:
             viewpoint_cam.update("SO3xR3")
-    
+
+def print_params(gaussians):
+    i = 0
+    para1 = gaussians.neural_phasefunc.shadow_func.parameters()
+    para2 = gaussians.neural_phasefunc.other_effects_func.parameters()
+    para3 = gaussians.neural_phasefunc.asg_func.parameters()
+    list_params1 = []
+    list_params2 = []
+    list_params3 = []
+    for param in para1:
+        list_params1.append(param)
+        i += 1
+        if i == 10:
+            break
+    for param in para2:
+        list_params2.append(param)
+        i += 1
+        if i == 10:
+            break
+    for param in para3:
+        list_params3.append(param)
+        i += 1
+        if i == 10:
+            break
+    print("param1", list_params1)
+    print("param2", list_params2)
+    print("param3", list_params3)
+
+    for n, m in gaussians.neural_phasefunc.asg_func.named_children():
+        print(f"Layer name: {n}, Type: {type(m)}")  # 打印每个子模块
+    for n, m in gaussians.neural_phasefunc.shadow_func.named_children():
+        print(f"Layer name: {n}, Type: {type(m)}")  # 打印每个子模块
+    for n, m in gaussians.neural_phasefunc.other_effects_func.named_children():
+        print(f"Layer name: {n}, Type: {type(m)}")  # 打印每个子模块
+
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
@@ -473,6 +554,7 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])     # 存储的迭代次数列表
     parser.add_argument("--start_checkpoint", type=str, default = None)
+    parser.add_argument("--asg_alpha_num", type=int, default=1)
 
     # 令 args 包含 parser 中定义的所有参数的键和值
     args = parser.parse_args(sys.argv[1:])  # argument vector， 第一位是文件名，所以从第二位开始解析
@@ -486,7 +568,8 @@ if __name__ == "__main__":
 
     # Start GUI server, configure and run training
     torch.autograd.set_detect_anomaly(args.detect_anomaly)  #如果命令行参数中包含 --detect_anomaly，则根据 stong_true 设置为True，将进行异常检测
-    
+
+
     # Start training
     training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.unfreeze_iterations, args.debug_from)
 

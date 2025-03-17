@@ -54,9 +54,11 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
         # render_pkg["render"] 
         # * render_pkg["shadow"]   # 存在一些内存泄漏
         # + render_pkg["other_effects"]
-        gt = view.original_image[0:3, :, :]
+        # gt = view.original_image[0:3, :, :]
         
-        if True:
+        if write_image:
+            # 如果图片是 hdr 格式，则 gamma 校正
+            # png 格式，是直接在 sRGB 空间 下重建的，因此不需要 gamma 校正
             if gamma:
                 gt = torch.pow(gt, 1/2.2)
                 rendering = torch.pow(rendering, 1/2.2)
@@ -72,7 +74,7 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
                 torchvision.utils.save_image(render_base, os.path.join(render_path, 'base', '{0:05d}'.format(idx) + ".png"))
             if rendering is not None:
                 torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
-            torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
+            # torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
 
 def render_sets(dataset : ModelParams, 
                 iteration : int, 
@@ -91,7 +93,7 @@ def render_sets(dataset : ModelParams,
     with torch.no_grad():
 
         # load Gaussians attributes, establish scene
-        gaussians = GaussianModel(dataset.sh_degree, dataset.use_nerual_phasefunc, basis_asg_num=dataset.basis_asg_num, asg_channel_num=dataset.asg_channel_num)
+        gaussians = GaussianModel(dataset.sh_degree, dataset.use_nerual_phasefunc, basis_asg_num=dataset.basis_asg_num, asg_channel_num=dataset.asg_channel_num, asg_mlp=dataset.asg_mlp)
         
         # 创建场景实例
         # iteration 为 -1 则加载最新的模型，否则加载指定迭代次数的模型，如果不存在则创建新的模型文件夹，但这里作为渲染，iteration 肯定要的哇
@@ -113,15 +115,16 @@ def render_sets(dataset : ModelParams,
                 (model_params, first_iter) = torch.load(_model_path)
                 # load ASG parameters
                 gaussians.asg_func = Mixture_of_ASG(dataset.basis_asg_num, dataset.asg_channel_num)
-                gaussians.asg_func.asg_sigma = model_params[8]
-                gaussians.asg_func.asg_rotation = model_params[9]
-                gaussians.asg_func.asg_scales = model_params[10]
+                gaussians.asg_func.asg_sigma = model_params[9]
+                gaussians.asg_func.asg_rotation = model_params[10]
+                gaussians.asg_func.asg_scales = model_params[11]
                 # load MLP parameters
                 gaussians.neural_phasefunc = Neural_phase(hidden_feature_size=dataset.phasefunc_hidden_size, \
                                         hidden_feature_layers=dataset.phasefunc_hidden_layers, \
                                         frequency=dataset.phasefunc_frequency, \
-                                        neural_material_size=dataset.neural_material_size).to(device="cuda")
-                gaussians.neural_phasefunc.load_state_dict(model_params[14])
+                                        neural_material_size=dataset.neural_material_size, \
+                                        asg_mlp = dataset.asg_mlp).to(device="cuda")
+                gaussians.neural_phasefunc.load_state_dict(model_params[15])
                 gaussians.neural_phasefunc.eval()
             else:
                 raise Exception(f"Could not find : {_model_path}")

@@ -21,6 +21,11 @@ from diff_gaussian_rasterization_light import  GaussianRasterizer as GaussianRas
 from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh
 from utils.graphics_utils import getProjectionMatrix, look_at
+import time
+
+
+debug = False
+
 
 def render(viewpoint_camera, 
            gau : GaussianModel, 
@@ -36,7 +41,8 @@ def render(viewpoint_camera,
            fix_labert = False,  # 是否只考虑漫反射，根据当前迭代次数来决定
            inten_scale = 1.0,   # 颜色强度缩放，但是感觉被弃用了
            is_train = False,    # 根据 prune_visibility
-           simplify = False,):  # 简化代码，没啥用
+           simplify = False,    # 简化代码，没啥用
+           asg_mlp = False): 
     
     """
     Render the scene. 
@@ -251,15 +257,18 @@ def render(viewpoint_camera,
                 """
                 cosTheta = _NdotWi(local_z, wi, torch.nn.ELU(alpha=0.01), 0.01)     # local_z, wi 都是朝外的，方向一致
                 diffuse = gau.get_kd / math.pi      # (N, 1)
-                specular = gau.get_ks * gau.asg_func(wi_local, wo_local, gau.get_alpha_asg, asg_scales, asg_axises) # (N, 3)
+                asg_1 =   gau.asg_func(wi_local, wo_local, gau.get_alpha_asg, asg_scales, asg_axises)
+                
+                
+                #specular = gau.get_ks * asg_1 # (N, 3)
 
                 # 刚开始只考虑 漫反射，不考虑其他反射，优化高斯的基础颜色
-                if fix_labert:
-                    colors_precomp = diffuse
-                else:
-                    colors_precomp = diffuse + specular 
+                #if fix_labert:
+                    #colors_precomp = diffuse
+                #else:
+                    #colors_precomp = diffuse + specular 
                 # intensity decays with distance
-                colors_precomp = colors_precomp * cosTheta * dist_2_inv
+                #colors_precomp = colors_precomp * cosTheta * dist_2_inv
 
             # calc_stream.wait_stream(light_stream)
 
@@ -276,8 +285,37 @@ def render(viewpoint_camera,
             # 神经网络优化 shadow 和 其他效果
             # neural components
             # 前期这里的得到的 shadow 和 other_effects 都是 0，因为此时没有开启神经网络优化
-            decay, other_effects = gau.neural_phasefunc(wi, wo, gau.get_xyz, gau.get_neural_material, shadow.unsqueeze(-1)) # (N, 1), (N, 3)
-            
+
+            if debug:
+                params = list(gau.neural_phasefunc.asg_func.parameters())
+                print("params", len(params))  # 查看参数个数
+                i = 0
+                list_params = []
+                for param in gau.neural_phasefunc.asg_func.parameters():
+                    list_params.append(param)
+                    i += 1
+                    if i == 10:
+                        break
+                print("param", param)
+                print("i", i)
+                print("asg_1.shape", asg_1.shape)
+            decay, other_effects, asg_3 = gau.neural_phasefunc(wi, wo, gau.get_xyz, gau.get_neural_material, shadow.unsqueeze(-1), asg_1, asg_mlp) # (N, 1), (N, 3)
+            if debug:
+                print("asg_3.shape", asg_3.shape)
+            specular = gau.get_ks * asg_3 # (N, 3)
+            if debug:
+                print("specular.shape", specular.shape)
+                time.sleep(4)
+
+            # 刚开始只考虑 漫反射，不考虑其他反射，优化高斯的基础颜色
+            if fix_labert:
+                colors_precomp = diffuse
+            else:
+                colors_precomp = diffuse + specular 
+            # intensity decays with distance
+            colors_precomp = colors_precomp * cosTheta * dist_2_inv
+
+
             # combine all components，按通道拼接，等待传入视角方向的高斯泼溅
             colors_precomp = torch.concat([colors_precomp * inten_scale, decay, other_effects * dist_2_inv * inten_scale], dim=-1) # (N, 7)
         
@@ -387,7 +425,8 @@ def render(viewpoint_camera,
             # 例如：
             # - 一个完全不透明、离相机很近、覆盖多个像素的点 -> 大权重
             # - 一个半透明、离相机远、只覆盖一个像素的点 -> 小权重
-            "out_weight": out_weight}
+            "out_weight": out_weight,
+            "asg3": asg_3}
 
 
 def _dot(x, y):

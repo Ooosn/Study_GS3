@@ -110,8 +110,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     light_stream = torch.cuda.Stream()  # 创建新的 CUDA 流
     calc_stream = torch.cuda.Stream()   # 创建另一个独立的 CUDA 流
 
-    
-    dddd = 0
+
 
     """开始训练"""
     # 每次迭代，都会从视点堆栈中选择一个视点，然后渲染图像，计算损失，更新模型参数，并不是每次计算全部视点的损失
@@ -130,6 +129,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                             freez_train_pl=opt.train_pl_freeze_step, \
                             cam_opt=dataset.cam_opt, \
                             pl_opt=dataset.pl_opt)
+            
             
         # Every 1000 its we increase the levels of SH up to a maximum degree
         # 采取神经网络后，不再使用球谐函数，因此不再需要逐级增加球谐函数的阶数
@@ -352,6 +352,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                                 print(gaussians.xyz_gradient_accum)
                                 print(gaussians.denom)
                             print("################################")
+                        print("xyz.shape", gaussians.get_xyz.shape)
                         gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
 
                         # 判断高斯点数量是否超过最大高斯点数量的95%，如果超过，则进行高斯修剪，剔除掉不可见的点
@@ -420,7 +421,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if dataset.asg_mlp and iteration == opt.asg_mlp_freeze: # 40000
                 asg_mlp = True
             
-            elif dataset.alpha_change and iteration == opt.asg_mlp_freeze:
+            elif dataset.alpha_change and iteration == 30040:
                 gaussians.start_alpha_asg(gaussians.get_alpha_asg)
                 print("alpha changed")
 

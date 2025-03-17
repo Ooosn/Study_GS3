@@ -50,13 +50,19 @@ class ModelParams(ParamGroup):
         self._source_path = ""
         self._model_path = ""
         self._images = "images"
+        # 调整图片分辨率，默认 -1，表示自动调整过大图片
         self._resolution = -1
+        # 是否使用白背景，默认 False
         self._white_background = False
+        # 图片储存设备，默认 cuda
         self.data_device = "cuda"
+        # 是否评估 测试集，默认评估，如果为 False，则不评估，并且测试集和训练集合并
         self.eval = True
+        # 当前输入 image 是否为 hdr 格式，默认 False
         self.hdr = False
+        # 是否使用神经相位函数，默认 True
         self.use_nerual_phasefunc = True
-        # input images upper limit
+        # 输入图片数量最大值，默认 2000
         self.view_num = 2000
         # MLP parameter
         self.phasefunc_hidden_size = 32
@@ -80,6 +86,9 @@ class ModelParams(ParamGroup):
         # save time for debug
         self.wang_debug = False
         self.asg_channel_num = 1
+        self.asg_mlp = False
+        self.alpha_change = False
+        
 
         super().__init__(parser, "Loading Parameters", sentinel)
 
@@ -115,7 +124,7 @@ class OptimizationParams(ParamGroup):
         self.spcular_freeze_step = 9_000
         # gradually change to linear if trained under hdr mode (for a stable initialization)
         self.fit_linear_step = 7_000
-        # ASG is initialized as aniso and freezed for a quick convergence
+        # ASG is initialized as aniso and freezed for a quick convergence 在早期训练时，冻结 asg 参数，快速收敛
         self.asg_freeze_step = 22000
         
         # ASG lr
@@ -166,6 +175,12 @@ class OptimizationParams(ParamGroup):
         self.opt_pl_lr_delay_mult = 0.1
         self.opt_pl_lr_max_steps = 80_000
 
+        """
+        mine
+        """
+        self.mlp_zero = False
+        self.asg_mlp_freeze = 40000
+        
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):

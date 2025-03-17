@@ -55,6 +55,7 @@ class Mixture_of_ASG(nn.Module):
         # 初始化 各 asg 的旋转方向
         # 依然采用 四元数
         asg_rotation = torch.zeros((self.basis_asg_num, 4), dtype=torch.float, device="cuda")
+        # 各 asg 初始化为 [1, 0, 0, 0]
         asg_rotation[:, 0] = 1
         self.asg_rotation = nn.Parameter(asg_rotation.requires_grad_(True))   # (basis_asg_num, 4)
 
@@ -173,12 +174,12 @@ class Mixture_of_ASG(nn.Module):
         asg_res = asg_res / (self.const * sigma)                            # (N, basis_asg_num, channel_num)
         if debug:
             print("asg_res.shape", asg_res.shape)
-            print("alpha.shape", alpha.shape)
+            print("alpha.shape", alpha.shape)                               # alpha 的维度为 (N, basis_asg_num，1/channel_num)
         # 组合多个 ASG 的贡献 
         mm_asg_res = torch.sum(alpha * asg_res, dim=1, keepdim=True)        # (N, 1, channel_num)
         if debug:
             print("mm_asg_res.shape", mm_asg_res.shape)
-        result = (mm_asg_res * Fresnel).squeeze()                             # (N, channel_num)   # 逐元素乘法 
+        result = (mm_asg_res * Fresnel).squeeze(1)                             # (N, channel_num)   # 逐元素乘法 
         if debug:
             print("result.shape", result.shape)
         return result

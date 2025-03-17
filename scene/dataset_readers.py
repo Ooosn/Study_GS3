@@ -197,6 +197,7 @@ def readCamerasFromTransforms(path, transformsfile, white_background, view_num, 
 
             bg = np.array([1, 1, 1]) if white_background else np.array([0, 0, 0])
             
+            # 这里只是读取图片，并进行初步处理
             image_path = os.path.join(path, cam_name)
             image_name = Path(cam_name).stem
             if extension == ".png":
@@ -259,9 +260,10 @@ def readNerfSyntheticInfo(path, white_background, eval, view_num, valid=False, s
     print("--------------------------------")
     if valid:
         # Only used for visualization, we use 400 frames for visualization
-        # Here actually don't provide the 400 real photos from different but continuous perspective 
+        # Here actually don't provide the 400 real photos from different but continuous perspective
         print("Reading Valid Transforms")
         valid_cam_infos = readCamerasFromTransforms(path, "transforms_valid.json", white_background, 400, extension)
+
         train_cam_infos = []
         test_cam_infos = []
         if not skip_train:

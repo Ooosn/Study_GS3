@@ -90,6 +90,7 @@ def loadCam(args, id, cam_info, resolution_scale):
         cam_cx = cam_info.cx / scale
         cam_cy = cam_info.cy / scale
 
+    # cam_info.image 中的 图片 是 pil 或 cv2 读取的，并且只进行了初步处理，因此需要转换成 torch 处理文件，并进行通道转换
     if args.hdr:
         resized_image_rgb = ExrtoTorch(cam_info.image, resolution)
     else:

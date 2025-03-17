@@ -62,7 +62,9 @@ class GaussianModel:
                  phase_frequency=4, 
                  neural_material_size=6, 
                  maximum_gs=1_000_000,
-                 asg_channel_num=1):
+                 asg_channel_num=1,
+                 asg_mlp=False,
+                 mlp_zero=False):
         
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree  
@@ -80,7 +82,12 @@ class GaussianModel:
         self.asg_channel_num = asg_channel_num
         self.alpha_asg = torch.empty(0)
         self.asg_func = torch.empty(0)
-        
+        self.asg_mlp = asg_mlp
+        self.asg_alpha_num = 1
+
+        # neural phase function
+        self.mlp_zero = mlp_zero
+
         # local frame
         self.local_q = torch.empty(0)
         
@@ -114,10 +121,52 @@ class GaussianModel:
         self.global_call_counter = 0
 
     def capture(self):
-        return (
-            self.active_sh_degree,
-            self._xyz,
-            self._features_dc,
+        return {
+        "active_sh_degree": self.active_sh_degree,
+        "_xyz": self._xyz,
+        "_features_dc": self._features_dc,
+        "_features_rest": self._features_rest,
+        "kd": self.kd,
+        "ks": self.ks,
+        "basis_asg_num": self.basis_asg_num,
+        "alpha_asg": self.alpha_asg,
+        "asg_sigma": self.asg_func.asg_sigma,
+        "asg_rotation": self.asg_func.asg_rotation,
+        "asg_scales": self.asg_func.asg_scales,
+        "local_q": self.local_q,
+        "neural_material": self.neural_material,
+        "neural_material_size": self.neural_material_size,
+        "neural_phasefunc": self.neural_phasefunc.state_dict() if self.use_MBRDF else self.neural_phasefunc,
+        "_scaling": self._scaling,
+        "_rotation": self._rotation,
+        "_opacity": self._opacity,
+        "max_radii2D": self.max_radii2D,
+        "xyz_gradient_accum": self.xyz_gradient_accum,
+        "out_weights_accum": self.out_weights_accum,
+        "denom": self.denom,
+        "optimizer": self.optimizer.state_dict(),
+        "spatial_lr_scale": self.spatial_lr_scale,
+        "maximum_gs": self.maximum_gs,
+        "asg_mlp": self.asg_mlp,
+        "asg_alpha_num": self.asg_alpha_num
+        }
+    
+    def restore(self, model_args, training_args):
+        if isinstance(model_args, dict):
+            for key, value in model_args.items():
+                if key == "neural_phasefunc":
+                    if self.use_MBRDF:
+                        self.neural_phasefunc.load_state_dict(value)
+                    else:
+                        self.neural_phasefunc = value
+                elif key == "optimizer":
+                    self.optimizer.load_state_dict(value)
+                else:
+                    setattr(self, key, value)  # 直接赋值
+        else: # 加载旧模型
+            (self.active_sh_degree, 
+            self._xyz, 
+            self._features_dc, 
             self._features_rest,
             self.kd,
             self.ks,
@@ -129,54 +178,27 @@ class GaussianModel:
             self.local_q,
             self.neural_material,
             self.neural_material_size,
-            self.neural_phasefunc.state_dict() if self.use_MBRDF else self.neural_phasefunc,
+            neural_phasefunc_param,
             self._scaling,
-            self._rotation,
+            self._rotation, 
             self._opacity,
-            self.max_radii2D,
-            self.xyz_gradient_accum,
-            self.out_weights_accum,
-            self.denom,
-            self.optimizer.state_dict(),
+            self.max_radii2D, 
+            xyz_gradient_accum, 
+            out_weights_accum,
+            denom,
+            opt_dict, 
             self.spatial_lr_scale,
-            self.maximum_gs
-        )
-    
-    def restore(self, model_args, training_args):
-        (self.active_sh_degree, 
-        self._xyz, 
-        self._features_dc, 
-        self._features_rest,
-        self.kd,
-        self.ks,
-        self.basis_asg_num,
-        self.alpha_asg,
-        self.asg_func.asg_sigma,
-        self.asg_func.asg_rotation,
-        self.asg_func.asg_scales,
-        self.local_q,
-        self.neural_material,
-        self.neural_material_size,
-        neural_phasefunc_param,
-        self._scaling,
-        self._rotation, 
-        self._opacity,
-        self.max_radii2D, 
-        xyz_gradient_accum, 
-        out_weights_accum,
-        denom,
-        opt_dict, 
-        self.spatial_lr_scale,
-        self.maximum_gs) = model_args
-        self.training_setup(training_args)
-        self.xyz_gradient_accum = xyz_gradient_accum
-        self.out_weights_accum = out_weights_accum
-        self.denom = denom
-        if self.use_MBRDF:
-            self.neural_phasefunc.load_state_dict(neural_phasefunc_param)
-        else:
-            self.neural_phasefunc = neural_phasefunc_param
-        self.optimizer.load_state_dict(opt_dict)
+            self.maximum_gs,
+            self.asg_mlp) = model_args
+            self.training_setup(training_args)
+            self.xyz_gradient_accum = xyz_gradient_accum
+            self.out_weights_accum = out_weights_accum
+            self.denom = denom
+            if self.use_MBRDF:
+                self.neural_phasefunc.load_state_dict(neural_phasefunc_param)
+            else:
+                self.neural_phasefunc = neural_phasefunc_param
+            self.optimizer.load_state_dict(opt_dict)
 
     @property
     def get_scaling(self):
@@ -317,8 +339,9 @@ class GaussianModel:
 
             # 基于 ASG (Anisotropic Spherical Gaussians)，混合多个 ASG 以逼近复杂的高光形状
             # 这里 channel_num 是 ASG 的通道数量，用于控制 ASG 的输出维度
-            alpha_asg = torch.zeros((features.shape[0], self.basis_asg_num, self.asg_channel_num), dtype=torch.float, device="cuda")
+            alpha_asg = torch.zeros((features.shape[0], self.basis_asg_num, 1), dtype=torch.float, device="cuda")
             self.alpha_asg = nn.Parameter(alpha_asg.requires_grad_(True))
+            
             self.asg_func = Mixture_of_ASG(self.basis_asg_num, self.asg_channel_num)  # forward(self, wi, wo, alpha_asg, asg_scales, asg_axises):
             
             # 局部旋转四元数（修正 wi 和 wo）
@@ -333,12 +356,36 @@ class GaussianModel:
             self.neural_phasefunc = Neural_phase(hidden_feature_size=self.hidden_feature_size, \
                                                 hidden_feature_layers=self.hidden_feature_layer, \
                                                 frequency=self.phase_frequency, \
-                                                neural_material_size=self.neural_material_size).to(device="cuda")
+                                                neural_material_size=self.neural_material_size, \
+                                                asg_mlp=self.asg_mlp, \
+                                                mlp_zero=self.mlp_zero).to(device="cuda")
            
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+
+    def start_alpha_asg(self, alpha_asg):
+        alpha_asg_channel = alpha_asg.repeat(1, 1, self.asg_channel_num)
+        self.alpha_asg = nn.Parameter(alpha_asg_channel.requires_grad_(True))
+        for group in self.optimizer.param_groups:
+            if group["name"] == "alpha_asg":
+                # 更新参数组中的参数
+                stored_state = self.optimizer.state.get(group['params'][0], None)
+
+            if stored_state is not None:    # 保险起见，虽然不可能
+                stored_state["exp_avg"] = torch.zeros_like(alpha_asg_channel)
+                stored_state["exp_avg_sq"] = torch.zeros_like(alpha_asg_channel)
+
+                del self.optimizer.state[group["params"][0]]
+            
+            group["params"] = [self.alpha_asg]
+
+            if stored_state is not None:
+                self.optimizer.state[group["params"][0]] = stored_state
+            break
+        
+        self.asg_alpha_num = 3
 
     """
     函数：
@@ -417,6 +464,7 @@ class GaussianModel:
                 param_group['lr'] = lr
 
     # 创建了一个 属性索引列表，用于下文的 ply 读取和存储 ———— ！！！因此要求这里的顺序和后面存储时的数据组合顺序要一致
+    # 但是这里只有 每个高斯点的属性，不包括神经网络参数和公用参数，比如asg基函数
     def construct_list_of_attributes(self):
         l = ['x', 'y', 'z', 'nx', 'ny', 'nz']
 
@@ -496,8 +544,12 @@ class GaussianModel:
             """
             np.concatenate: 将数据组合按 axis 拼接
             """
-            attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation, \
-                                        kd, ks, alpha_asg[:, :, 0], alpha_asg[:, :, 1], alpha_asg[:, :, 2], local_q, neural_material), axis=1)
+            if self.asg_alpha_num == 1:
+                attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation, \
+                                            kd, ks, alpha_asg[:, :, 0], local_q, neural_material), axis=1)
+            else:
+                attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation, \
+                                            kd, ks, alpha_asg[:, :, 0], alpha_asg[:, :, 1], alpha_asg[:, :, 2], local_q, neural_material), axis=1)
         else:
             attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
 
@@ -590,6 +642,7 @@ class GaussianModel:
             for attr_name in alpha_asg_names:
                 basis, channel = map(int, attr_name.split('_')[-2:])  # 解析通道索引 j 和 Basis 索引 i
                 alpha_asg[:, basis, channel] = np.asarray(plydata.elements[0][attr_name])  # 赋值到正确位置
+
                 
             local_q_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("local_q_")]
             local_q_names = sorted(local_q_names, key = lambda x: int(x.split('_')[-1]))

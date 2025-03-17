@@ -141,14 +141,16 @@ class GaussianModel:
         "_rotation": self._rotation,
         "_opacity": self._opacity,
         "max_radii2D": self.max_radii2D,
-        "xyz_gradient_accum": self.xyz_gradient_accum,
-        "out_weights_accum": self.out_weights_accum,
-        "denom": self.denom,
-        "optimizer": self.optimizer.state_dict(),
         "spatial_lr_scale": self.spatial_lr_scale,
         "maximum_gs": self.maximum_gs,
         "asg_mlp": self.asg_mlp,
-        "asg_alpha_num": self.asg_alpha_num
+        "asg_alpha_num": self.asg_alpha_num,
+
+        # 这四个按照这个顺序
+        "optimizer": self.optimizer.state_dict(),
+        "xyz_gradient_accum": self.xyz_gradient_accum,
+        "out_weights_accum": self.out_weights_accum,
+        "denom": self.denom,
         }
     
     def restore(self, model_args, training_args):
@@ -160,9 +162,14 @@ class GaussianModel:
                     else:
                         self.neural_phasefunc = value
                 elif key == "optimizer":
-                    self.optimizer.load_state_dict(value)
+                    self.training_setup(training_args)
                 else:
                     setattr(self, key, value)  # 直接赋值
+                    if isinstance(value, torch.Tensor):
+                        print(value.shape)
+
+            self.optimizer.load_state_dict(model_args["optimizer"])
+            
         else: # 加载旧模型
             (self.active_sh_degree, 
             self._xyz, 
@@ -368,22 +375,25 @@ class GaussianModel:
     def start_alpha_asg(self, alpha_asg):
         alpha_asg_channel = alpha_asg.repeat(1, 1, self.asg_channel_num)
         self.alpha_asg = nn.Parameter(alpha_asg_channel.requires_grad_(True))
+        
         for group in self.optimizer.param_groups:
+            
+            print(group["name"])
             if group["name"] == "alpha_asg":
-                # 更新参数组中的参数
+                # 更新参数组中的参数 
                 stored_state = self.optimizer.state.get(group['params'][0], None)
 
-            if stored_state is not None:    # 保险起见，虽然不可能
-                stored_state["exp_avg"] = torch.zeros_like(alpha_asg_channel)
-                stored_state["exp_avg_sq"] = torch.zeros_like(alpha_asg_channel)
+                if stored_state is not None:    # 保险起见，虽然不可能
+                    stored_state["exp_avg"] = torch.zeros_like(alpha_asg_channel)
+                    stored_state["exp_avg_sq"] = torch.zeros_like(alpha_asg_channel)
 
-                del self.optimizer.state[group["params"][0]]
-            
-            group["params"] = [self.alpha_asg]
+                    del self.optimizer.state[group["params"][0]]
+                
+                group["params"] = [self.alpha_asg]
 
-            if stored_state is not None:
-                self.optimizer.state[group["params"][0]] = stored_state
-            break
+                if stored_state is not None:
+                    self.optimizer.state[group["params"][0]] = stored_state
+                break
         
         self.asg_alpha_num = 3
 
@@ -803,6 +813,7 @@ class GaussianModel:
             # assert len(group["params"]) == 1
             # 找到需要拼接的张量
             extension_tensor = tensors_dict[group["name"]]
+            print(group["params"][0].shape)
             stored_state = self.optimizer.state.get(group['params'][0], None)
             if stored_state is not None:
                 
@@ -829,6 +840,8 @@ class GaussianModel:
                 group["params"][0] = nn.Parameter(torch.cat((group["params"][0], extension_tensor), dim=0).requires_grad_(True))
                 optimizable_tensors[group["name"]] = group["params"][0]
 
+        for key, value in optimizable_tensors.items():
+            print(key, value.shape)
         return optimizable_tensors
 
     """
@@ -837,6 +850,7 @@ class GaussianModel:
     返回：无返回，直接更新 self 中的属性
     """
     def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_kd, new_ks, new_alpha_asg, local_q, new_neural_material):
+        
         d = {"xyz": new_xyz,
         "f_dc": new_features_dc,
         "f_rest": new_features_rest,
@@ -854,6 +868,7 @@ class GaussianModel:
         # 新生成的高斯点和之前的高斯点拼接，直接更新参数和优化器
         # cat_tensors_to_optimizer(d) 函数拼接原高斯点和新添加的 d 高斯点，并且同时更新优化器状态，并且返回 optimizable_tensors 所有拼接后的 非通用asg 高斯点参数属性
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
+
 
         # 利用返回的 optimizable_tensors 更新类内部的属性
         self._xyz = optimizable_tensors["xyz"]
@@ -1013,6 +1028,7 @@ class GaussianModel:
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
         # 计算各点归一化后的累积2D梯度，即除以各自累积的次数
         grads = self.xyz_gradient_accum / self.denom
+
         # 将 grads 中 NaN 值变为 0
         grads[grads.isnan()] = 0.0
         """
@@ -1022,6 +1038,7 @@ class GaussianModel:
         """
         # 获得权重累加器，在后续的 densify 过程中，权重会被和其他一些判断信息一起初始化，所以先拿出来，准备后面修剪使用
         out_weights_acc = self.out_weights_accum
+       
 
         # 调用 densify_and_clone 和 densify_and_split 函数
         self.densify_and_clone(grads, max_grad, extent)

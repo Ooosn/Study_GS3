@@ -352,7 +352,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                                 print(gaussians.xyz_gradient_accum)
                                 print(gaussians.denom)
                             print("################################")
-                        print("xyz.shape", gaussians.get_xyz.shape)
                         gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
 
                         # 判断高斯点数量是否超过最大高斯点数量的95%，如果超过，则进行高斯修剪，剔除掉不可见的点
@@ -397,7 +396,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if phase_func_freezed and iteration >= unfreeze_iterations: # 5000
                 gaussians.neural_phasefunc.unfreeze()
                 phase_func_freezed = False
-                print(1)
 
             # 抵达 spcular_freeze_step 时：冻结相变函数，但依然只考虑 漫反射
             """
@@ -411,7 +409,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if iteration == opt.spcular_freeze_step + opt.fit_linear_step: # 15000
                 gaussians.neural_phasefunc.unfreeze()
                 gaussians.neural_material.requires_grad_(True)
-                print(2)
 
             # 判断是否保存模型
             if (iteration in checkpoint_iterations):
@@ -421,7 +418,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if dataset.asg_mlp and iteration == opt.asg_mlp_freeze: # 40000
                 asg_mlp = True
             
-            elif dataset.alpha_change and iteration == 30040:
+            elif dataset.alpha_change and iteration == opt.asg_mlp_freeze:
                 gaussians.start_alpha_asg(gaussians.get_alpha_asg)
                 print("alpha changed")
 

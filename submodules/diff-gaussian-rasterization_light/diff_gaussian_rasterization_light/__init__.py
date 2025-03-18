@@ -119,7 +119,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         也就是虽然我们在 autograd 中，但是这些中间变量的依然作为计算图一部分被记录，依然会占据内存
         所以使用 ctx.save_for_backward() 保存中间变量，torch 会自动释放中间变量，相当于 detach
         """
-        # 只保存 tensor 的值，不会存储梯度，计算图等
+        # 只保存 tensor 的值，会使用 detach 不会存储梯度，计算图等
         ctx.save_for_backward(colors_precomp, means3D, scales, rotations, cov3Ds_precomp, radii, sh, geomBuffer, binningBuffer, imgBuffer)
         
         # 返回 渲染结果，torch 会将他们作为计算图中的下一个节点

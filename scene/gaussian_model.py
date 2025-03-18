@@ -373,12 +373,10 @@ class GaussianModel:
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
     def start_alpha_asg(self, alpha_asg):
-        alpha_asg_channel = alpha_asg.repeat(1, 1, self.asg_channel_num)
+        alpha_asg_channel = alpha_asg.repeat(1, 1, 3)
         self.alpha_asg = nn.Parameter(alpha_asg_channel.requires_grad_(True))
         
         for group in self.optimizer.param_groups:
-            
-            print(group["name"])
             if group["name"] == "alpha_asg":
                 # 更新参数组中的参数 
                 stored_state = self.optimizer.state.get(group['params'][0], None)
@@ -813,7 +811,6 @@ class GaussianModel:
             # assert len(group["params"]) == 1
             # 找到需要拼接的张量
             extension_tensor = tensors_dict[group["name"]]
-            print(group["params"][0].shape)
             stored_state = self.optimizer.state.get(group['params'][0], None)
             if stored_state is not None:
                 
@@ -840,8 +837,7 @@ class GaussianModel:
                 group["params"][0] = nn.Parameter(torch.cat((group["params"][0], extension_tensor), dim=0).requires_grad_(True))
                 optimizable_tensors[group["name"]] = group["params"][0]
 
-        for key, value in optimizable_tensors.items():
-            print(key, value.shape)
+
         return optimizable_tensors
 
     """

@@ -15,8 +15,8 @@
 #include "config.h"
 #include "stdio.h"
 
-#define BLOCK_SIZE (BLOCK_X * BLOCK_Y)
-#define NUM_WARPS (BLOCK_SIZE/32)
+#define BLOCK_SIZE (BLOCK_X * BLOCK_Y)	// 每个 Block 启动的线程数量，即 blockDim.x * blockDim.y。
+#define NUM_WARPS (BLOCK_SIZE/32)	// CUDA 每 32 个线程组成一个 Warp
 
 // Spherical harmonics coefficients
 __device__ const float SH_C0 = 0.28209479177387814f;

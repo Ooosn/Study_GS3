@@ -352,6 +352,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                                 print(gaussians.xyz_gradient_accum)
                                 print(gaussians.denom)
                             print("################################")
+                        # 高斯密集化，并进行高斯修剪，# 梯度阈值，最小透明度，场景范围，尺寸阈值
                         gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
 
                         # 判断高斯点数量是否超过最大高斯点数量的95%，如果超过，则进行高斯修剪，剔除掉不可见的点

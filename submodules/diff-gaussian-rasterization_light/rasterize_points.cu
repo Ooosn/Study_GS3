@@ -24,82 +24,166 @@
 #include <string>
 #include <functional>
 
+// added: trans
+
+
+
+// char* 也许会认为是 字符串 的指针，但其实他也是最低级的指针类型，可用于 逐字节操作数据 的指针。
+
+// 返回 std::function<char*(size_t N)>  类型 ————  返回一个 函数，这个函数接受一个 size_t 类型的参数 N，返回一个 char* 类型的指针。
+// 这个函数的作用是 ————  当需要调整张量 t 的大小时，使用这个函数来调整张量的大小，并返回一个指向调整后张量数据的指针。
+// size_t ————  unsigned int 类型，一般用于表示一个对象的大小（以字节为单位），也就是表达一个变量的 size
+// 因此 resizeFunctional 函数 ————  接受一个 torch::Tensor 类型的参数 t，并返回一个 std::function<char*(size_t N)> 类型的函数。 
+
+/* 
+ * lamda 表达式 ————  [] 捕捉外部变量，() 需要输入的参数，{} 函数体
+ * lamda 表达式 默认是 const 的，如果需要修改外部变量，需要使用 mutable 关键字
+ * & 的优先级 高于 const ，即便 变量 是 const 的，也可以修改
+*/
+
 std::function<char*(size_t N)> resizeFunctional(torch::Tensor& t) {
-    auto lambda = [&t](size_t N) {
+    // 内部 定义 lambda 表达式
+	// auto lambda = ... 让编译器推导 lambda 的类型
+	auto lambda = [&t](size_t N) {
+		// torch 函数后面跟_，表示 原地修改
+		// (type)variable ————  将 variable 转换为 type 类型
+		// long long ———— int64_t 类型
+		// {} ———— 统一初始化方式，根据上下文自动推导
+		/*
+		 * size_t ————  unsigned int 类型，但是 resize_ 的参数需要 long long 类型，
+		 * 因此需要将 size_t 转换为 long long 类型
+		 * 所以这里的指令，是 将 t 的大小 调整为 N 字节
+		*/
         t.resize_({(long long)N});
+		// reinterpret_cast<char*> ————  直接改变指针类型，将 t 的内存地址转换为 char* 类型
+		// t.contiguous().data_ptr() ————  返回 t 的内存地址
+		/*
+		 * data_ptr() 返回指向 t 数据的原始指针，但返回类型是 void*，需要转换为 char* 类型
+		 * void* 只能用于存储地址，不能用于运算
+		 * reinterpret_cast<> ————  让 void* 变成可用的类型，比如 reinterpret_cast<> 告诉编译器：“我明确知道这个 void* 其实是 int* 类型，请放心使用”
+		*/ 
 		return reinterpret_cast<char*>(t.contiguous().data_ptr());
     };
+	// 返回 lambda 表达式
     return lambda;
 }
 
+
+/*
+ * 函数：用 cuda 实现 高斯分布的 光栅化
+ * 接收多个 torch::Tensor 作为输入（比如 3D 坐标、颜色、透明度等）
+ * 创建 CUDA 设备上的缓冲区（geomBuffer、binningBuffer、imgBuffer）
+ * 调用 CudaRasterizer::Rasterizer::forward() 进行 CUDA 计算
+ * 返回多个 torch::Tensor 结果，比如颜色、权重、半径、变换信息等
+*/ 
 std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 RasterizeGaussiansCUDA(
-	const torch::Tensor& background,
-	const torch::Tensor& means3D,
-    const torch::Tensor& colors,
-    const torch::Tensor& opacity,
-	const torch::Tensor& scales,
-	const torch::Tensor& rotations,
-	const float scale_modifier,
-	const torch::Tensor& cov3D_precomp,
-	const torch::Tensor& viewmatrix,
-	const torch::Tensor& projmatrix,
-	const float tan_fovx, 
-	const float tan_fovy,
-    const int image_height,
-    const int image_width,
-	const torch::Tensor& sh,
-	const int degree,
-	const torch::Tensor& campos,
-	const bool prefiltered,
-	const bool debug,
-	const torch::Tensor& non_trans,
-	const float offset,
-	const float thres,
-	const bool is_train)
+	
+	const torch::Tensor& background,// 背景颜色
+	const torch::Tensor& means3D,	// 3D 坐标
+    const torch::Tensor& colors,	// 颜色
+    const torch::Tensor& opacity,	// 透明度
+	const torch::Tensor& scales,	// 缩放
+	const torch::Tensor& rotations,	// 旋转
+	const float scale_modifier,	// 缩放比例
+	const torch::Tensor& cov3D_precomp,	// 协方差矩阵
+	const torch::Tensor& viewmatrix,	// 视图矩阵
+	const torch::Tensor& projmatrix,	// 投影矩阵
+	const float tan_fovx, 	// 视图矩阵的 x 方向的切线
+	const float tan_fovy,	// 视图矩阵的 y 方向的切线
+    const int image_height,	// 图像高度
+    const int image_width,	// 图像宽度
+	const torch::Tensor& sh,	// sh 系数
+	const int degree,	// sh 阶数
+	const torch::Tensor& campos,	// 相机位置
+	const bool prefiltered,	// 预过滤， 默认 false
+	const bool debug,	// 调试， 默认 false
+	const torch::Tensor& non_trans,	// 非透明
+	const float offset,	// 偏移
+	const float thres,	// 阈值
+	const bool is_train)	// prune_visibility
 {
+// 检查 means3D 的维度是否为 2，且第二维的大小是否为 3
   if (means3D.ndimension() != 2 || means3D.size(1) != 3) {
     AT_ERROR("means3D must have dimensions (num_points, 3)");
   }
   
+// 定义常量：高斯点数量
   const int P = means3D.size(0);
+// 定义常量：图像高度
   const int H = image_height;
+// 定义常量：图像宽度
   const int W = image_width;
 
+/*
+* torch::TensorOptions ————  用于指定张量的数据类型、设备类型等属性。
+* options = a.options() ————  返回 a 的 torch::TensorOptions 对象
+* options.dtype() ————  返回该对象的 dtype 属性
+* options.device() ————  返回该对象的 device 属性
+*  ......
+* 如果 options.dtype(?) 并不是空括号，则返回 a 的 torch::TensorOptions 对象，但 dtype 属性为 ?，其他同理
+* 相当于在修改的基础上，继承了 a 的其他属性
+*/
+// 获得 means3D 的 TensorOptions ， 并设置 dtype 为 int32
+// 获得 means3D 的 TensorOptions ， 并设置 dtype 为 float32
+// 然后 可以直接用 int_opts 和 float_opts 来创建张量，从而继承这些其他的 means3D 的属性
   auto int_opts = means3D.options().dtype(torch::kInt32);
   auto float_opts = means3D.options().dtype(torch::kFloat32);
 
-//   torch::Tensor out_color = torch::full({NUM_CHANNELS, H, W}, 0.0, float_opts);
-  torch::Tensor radii = torch::full({P}, 0, means3D.options().dtype(torch::kInt32));
+/*
+* torch::full(size, value, options) ————  创建一个全为 value 的张量，并指定其数据类型和设备类型
+* size ————  张量的形状 {}
+* value ————  张量中每个元素的值，比如 0.0 表示每个元素的值为 0.0
+* options ————  张量的数据类型和设备类型，用 torch::TensorOptions 对象来指定。
+*/
+// const int P = means3D.size(0);
+// 初始化 radii，out_color，out_weight，trans
+  torch::Tensor radii = torch::full({P}, 0, int_opts);
   torch::Tensor out_color = torch::full({2,2,2}, 0.0, float_opts);
   torch::Tensor out_weight = torch::full({P, 1}, 0.0, float_opts);
-//   torch::Tensor radii = torch::full({1}, 0, means3D.options().dtype(torch::kInt32));
   torch::Tensor trans = torch::full({P}, 0.0, float_opts);
   
+
+  // torch::Device 和 torch::TensorOptions class 类型，（）内为构造函数声明
   torch::Device device(torch::kCUDA);
   torch::TensorOptions options(torch::kByte);
+  // 初始化 三个缓冲区
   torch::Tensor geomBuffer = torch::empty({0}, options.device(device));
   torch::Tensor binningBuffer = torch::empty({0}, options.device(device));
   torch::Tensor imgBuffer = torch::empty({0}, options.device(device));
+  // 初始化 三个缓冲区的 调整函数
+  // 调整函数 ————  接受一个 size_t 类型的参数 N，返回一个 char* 类型的指针，这里用于调整 缓冲区的大小
   std::function<char*(size_t)> geomFunc = resizeFunctional(geomBuffer);
   std::function<char*(size_t)> binningFunc = resizeFunctional(binningBuffer);
   std::function<char*(size_t)> imgFunc = resizeFunctional(imgBuffer);
   
+  // .data<float>() 和 .data_ptr<float>() 的区别 ———— 没有区别，data_ptr() 更新
+
   int rendered = 0;
+  // const int P = means3D.size(0);
+  // 如果高斯点数量不为 0，则进行光栅化
   if(P != 0)
   {
+	  // 根据 sh 系数的维度，初始化 M
+	  // sh 维度为 （num_points, num_coefficients）
 	  int M = 0;
 	  if(sh.size(0) != 0)
 	  {
 		M = sh.size(1);
       }
 
+	  // 调用 CudaRasterizer::Rasterizer::forward() 进行 CUDA 计算
 	  rendered = CudaRasterizer::Rasterizer::forward(
+
+		// 缓冲区调整函数
 	    geomFunc,
 		binningFunc,
 		imgFunc,
+
+		// 输入参数
 	    P, degree, M,
 		background.contiguous().data<float>(),
+		// 图像高度和宽度
 		W, H,
 		means3D.contiguous().data<float>(),
 		sh.contiguous().data_ptr<float>(),
@@ -115,16 +199,22 @@ RasterizeGaussiansCUDA(
 		tan_fovx,
 		tan_fovy,
 		prefiltered,
+
+		// return 的 四个张量
 		out_color.contiguous().data<float>(),
 		out_weight.contiguous().data<float>(),
 		radii.contiguous().data<int>(),
 		trans.contiguous().data<float>(),
+
+		// 其他参数
 		debug,
 		non_trans.contiguous().data<float>(),
 		offset,
 		thres,
 		is_train);
   }
+
+  // 返回 前向传播的 结果
   return std::make_tuple(rendered, out_color, out_weight, radii, trans, geomBuffer, binningBuffer, imgBuffer);
 }
 
@@ -149,7 +239,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	const int degree,
 	const torch::Tensor& campos,
 	const torch::Tensor& geomBuffer,
-	const int R,
+	const int R, // num_rendered,
 	const torch::Tensor& binningBuffer,
 	const torch::Tensor& imageBuffer,
 	const bool debug,
@@ -169,6 +259,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	M = sh.size(1);
   }
 
+// 初始化 返回的张量，也是我们需要的 梯度
   torch::Tensor dL_dmeans3D = torch::zeros({P, 3}, means3D.options());
   torch::Tensor dL_dmeans2D = torch::zeros({P, 3}, means3D.options());
   torch::Tensor dL_dcolors = torch::zeros({P, NUM_CHANNELS}, means3D.options());
@@ -197,6 +288,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	  tan_fovx,
 	  tan_fovy,
 	  radii.contiguous().data<int>(),
+	  // 以 char* 类型 返回 缓冲区
 	  reinterpret_cast<char*>(geomBuffer.contiguous().data_ptr()),
 	  reinterpret_cast<char*>(binningBuffer.contiguous().data_ptr()),
 	  reinterpret_cast<char*>(imageBuffer.contiguous().data_ptr()),

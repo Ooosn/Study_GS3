@@ -21,7 +21,7 @@ class ParamGroup:
         group = parser.add_argument_group(name)
         for key, value in vars(self).items():
             shorthand = False
-            if key.startswith("_"):        #检查参数是否支持简写，即使用'-'+首字母作为简写
+            if key.startswith("_"):        #检查参数是否支持简写，即使用'_'+首字母作为简写
                 shorthand = True
                 key = key[1:]              #去掉下划线
             t = type(value)
@@ -156,7 +156,7 @@ class OptimizationParams(ParamGroup):
         self.densification_interval = 100
         self.opacity_reset_interval = 3_000
         self.densify_from_iter = 500
-        self.densify_until_iter = 15_000
+        self.densify_until_iter = 100_000
         self.densify_grad_threshold = 0.0002
         self.random_background = False
 

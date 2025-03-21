@@ -575,13 +575,8 @@ class GaussianModel:
         # 写入:
         PlyData([el]).write(path)
 
-    # 将透明度过大的点重置透明度为一个合适的值，保证所有点都能得到训练，而不是出现类似神经元的 高斯死亡。
-    """
-    比如 opacity ≈ 0.0001：
-	    - self._opacity = inverse_sigmoid(0.001) ≈ -9.2
-		- sigmoid'(-9.2) ≈ 0.000099
-		- 梯度变得极小，几乎无法更新
-    """
+    # 将不透明度过大的点重置透明度为回归近乎透明，重新训练，避免某些部分效果不好但梯度消失。
+    # 当不透明度 小于 0.005 时，会删除这些点，因此我们只用 设置 0.01 作为阈值
     def reset_opacity(self):
         opacities_new = inverse_sigmoid(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")

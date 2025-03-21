@@ -67,7 +67,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         thres,
         is_train,
     ):
-
+        
         # Restructure arguments the way that the C++ lib expects them
         args = (
             raster_settings.bg, 
@@ -86,12 +86,16 @@ class _RasterizeGaussians(torch.autograd.Function):
             raster_settings.image_width,
             sh,
             raster_settings.sh_degree,
+            # 相机位置，在向光源泼溅中，则为光源位置
             raster_settings.campos,
             raster_settings.prefiltered,
             raster_settings.debug,
-            non_trans,
+            # opacity_light = torch.zeros(scales.shape[0], dtype=torch.float32, device=scales.device)
+            # non_trans = opacity_light
+            non_trans,  
             offset,
             thres,
+            # is_train = prune_visibility: 
             is_train,
         )
 
@@ -116,10 +120,11 @@ class _RasterizeGaussians(torch.autograd.Function):
 
         """
         计算图传播独立于梯度值存在
-        也就是虽然我们在 autograd 中，但是这些中间变量的依然作为计算图一部分被记录，依然会占据内存
+        也就是虽然我们在 autograd 中，如果我们不使用 ctx.save_for_backward() ，而是直接赋值，
+            - 那么这些中间变量依然作为计算图一部分被记录，使被引用变量 引用次数 增加，从而本该被释放的变量 不会被释放
         所以使用 ctx.save_for_backward() 保存中间变量，torch 会自动释放中间变量，相当于 detach
         """
-        # 只保存 tensor 的值，会使用 detach 不会存储梯度，计算图等
+        # 相当于使用 .detach() ，只保存 tensor 的值，不会存储梯度，计算图等
         ctx.save_for_backward(colors_precomp, means3D, scales, rotations, cov3Ds_precomp, radii, sh, geomBuffer, binningBuffer, imgBuffer)
         
         # 返回 渲染结果，torch 会将他们作为计算图中的下一个节点

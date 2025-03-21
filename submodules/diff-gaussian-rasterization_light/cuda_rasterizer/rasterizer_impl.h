@@ -9,66 +9,89 @@
  * For inquiries contact  george.drettakis@inria.fr
  */
 
-#pragma once
+#ifndef CUDA_RASTERIZER_H_INCLUDED
+#define CUDA_RASTERIZER_H_INCLUDED
 
-#include <iostream>
 #include <vector>
-#include "rasterizer.h"
-#include <cuda_runtime_api.h>
+#include <functional>
 
 namespace CudaRasterizer
 {
-	template <typename T>
-	static void obtain(char*& chunk, T*& ptr, std::size_t count, std::size_t alignment)
+	class Rasterizer
 	{
-		std::size_t offset = (reinterpret_cast<std::uintptr_t>(chunk) + alignment - 1) & ~(alignment - 1);
-		ptr = reinterpret_cast<T*>(offset);
-		chunk = reinterpret_cast<char*>(ptr + count);
-	}
+	public:
 
-	struct GeometryState
-	{
-		size_t scan_size;
-		float* depths;
-		char* scanning_space;
-		bool* clamped;
-		int* internal_radii;
-		float2* means2D;
-		float* cov3D;
-		float4* conic_opacity;
-		float* rgb;
-		uint32_t* point_offsets;
-		uint32_t* tiles_touched;
+		static void markVisible(
+			int P,
+			float* means3D,
+			float* viewmatrix,
+			float* projmatrix,
+			bool* present);
 
-		static GeometryState fromChunk(char*& chunk, size_t P);
+		static int forward(
+			std::function<char* (size_t)> geometryBuffer,
+			std::function<char* (size_t)> binningBuffer,
+			std::function<char* (size_t)> imageBuffer,
+			const int P, int D, int M,
+			const float* background,
+			const int width, int height,
+			const float* means3D,
+			const float* shs,
+			const float* colors_precomp,
+			const float* opacities,
+			const float* scales,
+			const float scale_modifier,
+			const float* rotations,
+			const float* cov3D_precomp,
+			const float* viewmatrix,
+			const float* projmatrix,
+			const float* cam_pos,
+			const float tan_fovx, float tan_fovy,
+			const bool prefiltered,
+			float* out_color,
+			float* out_weight,
+			int* radii = nullptr,
+			float* out_trans = nullptr,
+			bool debug = false,
+			float* non_trans=nullptr,
+			const float offset=0.015,
+			const float thres=4,
+			const bool is_train=false);
+
+		static void backward(
+			const int P, int D, int M, int R,
+			const float* background,
+			const int width, int height,
+			const float* means3D,
+			const float* shs,
+			const float* colors_precomp,
+			const float* scales,
+			const float scale_modifier,
+			const float* rotations,
+			const float* cov3D_precomp,
+			const float* viewmatrix,
+			const float* projmatrix,
+			const float* campos,
+			const float tan_fovx, float tan_fovy,
+			const int* radii,
+			char* geom_buffer,
+			char* binning_buffer,
+			char* image_buffer,
+			const float* dL_dpix,
+			const float* dL_dtrans,
+			const float* trans,
+			float* dL_dmean2D,
+			float* dL_dconic,
+			float* dL_dopacity,
+			float* dL_dcolor,
+			float* dL_dmean3D,
+			float* dL_dcov3D,
+			float* dL_dsh,
+			float* dL_dscale,
+			float* dL_drot,
+			bool debug,
+			const float* non_trans);
 	};
-
-	struct ImageState
-	{
-		uint2* ranges;
-		uint32_t* n_contrib;
-		float* accum_alpha;
-
-		static ImageState fromChunk(char*& chunk, size_t N);
-	};
-
-	struct BinningState
-	{
-		size_t sorting_size;
-		uint64_t* point_list_keys_unsorted;
-		uint64_t* point_list_keys;
-		uint32_t* point_list_unsorted;
-		uint32_t* point_list;
-		char* list_sorting_space;
-
-		static BinningState fromChunk(char*& chunk, size_t P);
-	};
-
-	template<typename T> 
-	size_t required(size_t P)
-	{
-		char* size = nullptr;
-		T::fromChunk(size, P);
-		return ((size_t)size) + 128;
-	}
 };
+
+#endif

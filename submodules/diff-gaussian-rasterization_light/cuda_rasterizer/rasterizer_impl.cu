@@ -10,6 +10,7 @@
  */
 
 #include "rasterizer_impl.h"
+
 #include <iostream>
 #include <fstream>
 #include <algorithm>
@@ -19,49 +20,81 @@
 #include "device_launch_parameters.h"
 #include <cub/cub.cuh>
 #include <cub/device/device_radix_sort.cuh>
+
 #define GLM_FORCE_CUDA
 #include <glm/glm.hpp>
 
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
-namespace cg = cooperative_groups;
+
 
 #include "auxiliary.h"
 #include "forward.h"
 #include "backward.h"
 
-// Helper function to find the next-highest bit of the MSB
+namespace cg = cooperative_groups;
+
+
+
+/**
+ * @brief markVisible()：标记可见的高斯点
+ * 		  forward()：前向渲染流程
+ * 		  backward()：反向渲染流程
+ * 		  GeometryState / ImageState / BinningState：存储渲染所需的几何、图像和排序状态
+ *  	  cub::DeviceRadixSort：使用 CUB 库 进行 GPU 并行排序
+ */
+
+
+// Helper function to find the next-highest bit of the MSB 计算一个数的最高位（按 1 计数）
 // on the CPU.
+// sizeof(n) * 4 ———— 计算 n 的 字节，因为 uint32_t 是 32 位，4字节，所以 sizeof(n) * 4 = 16，利用 2 分法 计算 最高位
 uint32_t getHigherMsb(uint32_t n)
 {
 	uint32_t msb = sizeof(n) * 4;
 	uint32_t step = msb;
-	while (step > 1)
+	while (step > 1)	// 直到步长为 1 为止
 	{
-		step /= 2;
-		if (n >> msb)
-			msb += step;
+		step /= 2;	// 下一次步长
+		if (n >> msb)	// n 右移 msb 位，如果不为 0 ，说明左半边存在 1，则继续朝左边找，否则 朝右边找   // >> ———— 右移运算符，高位补 0，低位丢弃
+			msb += step;	// 增加 n 右移的位数
 		else
-			msb -= step;
+			msb -= step;	// 减少 n 右移的位数
 	}
-	if (n >> msb)
-		msb++;
+	if (n >> msb)	// 最后一次单独的判断，即最终步长为 1 时的右移位数
+		msb++;		// msb 最小为 1，最大为 31，因此 如果 n 是 0，依然返回 1，其他的按最高位返回（按 1 计数）
 	return msb;
 }
 
 // Wrapper method to call auxiliary coarse frustum containment test.
 // Mark all Gaussians that pass it.
-__global__ void checkFrustum(int P,
-	const float* orig_points,
-	const float* viewmatrix,
-	const float* projmatrix,
-	bool* present)
-{
+/**
+ * @brief 判断高斯点是否在视图范围内
+ * @note __global__ 声明一个 GPU 核函数
+ *                  - 这意味着 checkFrustum() 不是在 CPU 上顺序执行的，而是在 GPU 上 "一次性启动成千上万个线程，并行计算"。
+ * 		            - 因此同时启动了可能成千上万个线程，只保留 P 个线程，其他线程返回
+ * @note __global__ 函数不支持 & 传递引用，因此必须用指针
+ * @note 使用时，通过 核函数名<<<网格大小, 线程块大小>>> 启动核函数
+ */
+__global__ void checkFrustum(int P, // 高斯点数量
+	const float* orig_points, // 高斯点坐标
+	const float* viewmatrix, // 视图矩阵
+	const float* projmatrix, // 投影矩阵
+	bool* present) // 是否可见 // 通过指针直接修改数据
+{											  
+	// idx = 网格（Grid/）blockIdx.x * 线程块（Block）blockDim.x+ 线程（Thread）threadIdx.x
+	// 网格代表不同kernel（任务），blockDim 是生产线，idx 是流水线上加工的零件
+	// 因此当运行该核函数时，就相当于启动了一个 kernel，kernel 中有 P 个任务（逻辑线程），每个任务都有一个 idx，它是线程的唯一编号
+	//     他们在不同的生产线（blockDim）上并行运行，所以他们会进入队列，等待 GPU 核心（工人）来处理
+	// 因此所有任务都能满足 从 0 到 P-1 的索引，并且不同任务的 idx 是唯一的，不会冲突
+	// 最终通过 不同的 idx 计算需要访问的内存地址，进行并行计算
 	auto idx = cg::this_grid().thread_rank();
-	if (idx >= P)
+	if (idx >= P) 			// 如果当前线程的索引大于等于高斯点数量，则返回，即每个 cuda 线程处理一个高斯点
 		return;
-
-	float3 p_view;
+	
+	// 每个线程 初始化 自己的 p_view 变量作为局部变量，函数要求嘛，虽然后续不使用，但是不能不传嘛
+	float3 p_view;	
+	//  in_frustum （auxiliary 函数中） ———— 判断高斯点是否在视图范围内
+	// 最终 得到 present[idx] ———— 一个 bool 值，表示当前高斯点是否在视图范围内
 	present[idx] = in_frustum(idx, orig_points, viewmatrix, projmatrix, false, p_view);
 }
 

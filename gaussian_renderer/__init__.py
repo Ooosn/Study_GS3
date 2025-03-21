@@ -420,13 +420,13 @@ def render(viewpoint_camera,
             "other_effects": rendered_image[4:7, :, :],
             "viewspace_points": meta["means2d"],
             "visibility_filter" : radii > 0,
-            "radii": radii,
+            "radii": radii,     # [N]
             # 权重值，由不透明度（累计得到的），2d覆盖范围，深度等信息得到的
             # 例如：
             # - 一个完全不透明、离相机很近、覆盖多个像素的点 -> 大权重
             # - 一个半透明、离相机远、只覆盖一个像素的点 -> 小权重
-            "out_weight": out_weight,
-            "asg3": asg_3}
+            "out_weight": out_weight,       # [N, 1]
+            "asg3": asg_3}                 # [N, asg_channel_num]
 
 
 def _dot(x, y):

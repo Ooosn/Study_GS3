@@ -182,7 +182,7 @@ def render(viewpoint_camera,
             scales = scales,
             rotations = rotations,
             cov3D_precomp = cov3D_precomp,
-            non_trans = opacity_light,
+            non_trans = opacity_light,  # 会改变 opacity_light 的值
             offset = 0.015,
             thres = 4,
             is_train = is_train)

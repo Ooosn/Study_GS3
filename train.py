@@ -356,6 +356,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
 
                         # 判断高斯点数量是否超过最大高斯点数量的95%，如果超过，则进行高斯修剪，剔除掉不可见的点
+                        # 不超过，则 prune_visibility 始终为 False，该分支和后续的 out_weight 相关
+                        # 当 prune_visibility 为 False 时，out_weight 不参与计算，因此输出权重为 0
                         if gaussians.get_xyz.shape[0] > gaussians.maximum_gs * 0.95:
                             prune_visibility = True
                     

@@ -177,7 +177,8 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	float4* conic_opacity,
 	const dim3 grid,
 	uint32_t* tiles_touched,
-	bool prefiltered)
+	bool prefiltered,
+	float* radii_comp)
 {
 	auto idx = cg::this_grid().thread_rank();
 	if (idx >= P)
@@ -204,7 +205,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	const float* cov3D;
 	if (cov3D_precomp != nullptr)
 	{
-		cov3D = cov3D_precomp + idx * 6;
+		cov3D = cov3D_precomp + idx * 6;	// 每个高斯点的 3D 协方差矩阵 指针，3D 协方差矩阵用 6 个元素表示
 	}
 	else
 	{
@@ -214,6 +215,20 @@ __global__ void preprocessCUDA(int P, int D, int M,
 
 	// Compute 2D screen-space covariance matrix
 	float3 cov = computeCov2D(p_orig, focal_x, focal_y, tan_fovx, tan_fovy, cov3D, viewmatrix);
+
+
+	/*
+	 * 源代码中近期加入了 抗锯齿处理
+	 * 原理就是：增大高斯的协方差，将高斯范围扩大（模糊），然后对不透明度做一个修正：
+	 * opacity * h_convolution_scaling
+	 * h_convolution_scaling = sqrt(max(0.000025f, det_cov / det_cov_plus_h_cov))
+	 * det_cov = cov.x * cov.z - cov.y * cov.y    原协方差行列式
+	 * h_var = 0.3f
+	 * cov.x += h_var;
+	 * cov.z += h_var;
+	 * det_cov_plus_h_cov = cov.x * cov.z - cov.y * cov.y;	模糊后协方差行列式
+	 */
+
 
 	// Invert covariance (EWA algorithm)
 	float det = (cov.x * cov.z - cov.y * cov.y);
@@ -229,7 +244,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	float mid = 0.5f * (cov.x + cov.z);
 	float lambda1 = mid + sqrt(max(0.1f, mid * mid - det));
 	float lambda2 = mid - sqrt(max(0.1f, mid * mid - det));
-	float my_radius = ceil(3.f * sqrt(max(lambda1, lambda2)));
+	float my_radius = 3.f * sqrt(max(lambda1, lambda2));
 	float2 point_image = { ndc2Pix(p_proj.x, W), ndc2Pix(p_proj.y, H) };
 	uint2 rect_min, rect_max;
 	getRect(point_image, my_radius, rect_min, rect_max, grid);
@@ -248,66 +263,121 @@ __global__ void preprocessCUDA(int P, int D, int M,
 
 	// Store some useful helper data for the next steps.
 	// change the z dist to the dist to camera center
+	// 这里计算的是 高斯点到相机中心的距离，原代码是 z 轴距离，因为我们要计算向光源点的遮挡，深度排序
 	depths[idx] = p_view.z*p_view.z+p_view.y*p_view.y+p_view.x*p_view.x;
-	radii[idx] = my_radius;
+	radii[idx] = ceil(my_radius);
+	radii_comp[idx] = my_radius;
 	points_xy_image[idx] = point_image;
 	// Inverse 2D covariance and opacity neatly pack into one float4
+	// conic.x, conic.y, conic.z 2D 协方差矩阵的逆，conic.w 高斯点的不透明度
 	conic_opacity[idx] = { conic.x, conic.y, conic.z, opacities[idx] };
 	tiles_touched[idx] = (rect_max.y - rect_min.y) * (rect_max.x - rect_min.x);
 }
 
+
 // Main rasterization method. Collaboratively works on one tile per
 // block, each thread treats one pixel. Alternates between fetching 
 // and rasterizing data.
+/**
+ * @brief forward 渲染
+ * 
+ * @attention __global__ ———— 在 GPU 上执行的函数
+ * @attention __launch_bounds__ ———— 告诉编译器，限制每个 block 的线程数量，保证每个线程有更多的硬件资源可以调用，比如寄存器
+ * @attention __restrict__ ———— 编译器默认：指针可能重叠
+ * 								- 告诉编译器，这个指针指向的数据不会和其他 __restrict__ 指针指向的数据重叠，方便编译器内存优化
+ * @attention const ———— 告诉编译器变量只读，方便编译器内存优化
+ * @attention tile <-> block，pixel <-> thread
+ * 
+ * @else CHANNELS ———— 模板参数：颜色通道数
+ */
 template <uint32_t CHANNELS>
 __global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
 renderCUDA(
-	const uint2* __restrict__ ranges,
-	const uint32_t* __restrict__ point_list,
-	int W, int H,
-	const float2* __restrict__ points_xy_image,
-	const float* __restrict__ depths,
-	const float* __restrict__ features,
-	const float4* __restrict__ conic_opacity,
-	float* __restrict__ final_T,
-	uint32_t* __restrict__ n_contrib,
-	const float* __restrict__ bg_color,
-	float* __restrict__ out_color,
-	float* __restrict__ out_weight,
-	float* __restrict__ out_trans,
+	const uint2* __restrict__ ranges,	// 每个 tile 的 point_list 索引范围
+	const uint32_t* __restrict__ point_list,	// 按[tile | depth] 键值对 排序后的 渲染高斯点 索引列表
+	int W, int H,	// 图片宽度和高度
+	const float2* __restrict__ points_xy_image,	// 每个高斯点的 二维坐标
+	const float* __restrict__ depths,	// 每个高斯点的 深度
+	const float* __restrict__ features,	// 每个高斯点的 sh特征
+	const float4* __restrict__ conic_opacity,	// 每个高斯点的 椭圆参数
+	float* __restrict__ final_T,	// 每个像素的 accum_alpha
+	uint32_t* __restrict__ n_contrib,	// 每个像素的 贡献者数量
+	const float* __restrict__ bg_color,	// 背景颜色
+	
+	// 输出
+	float* __restrict__ out_color,	// 每个像素的 颜色
+	float* __restrict__ out_weight,	// 每个像素的 权重
+	float* __restrict__ out_trans,	// 每个像素的 透明度
+
+	// 其他参数
 	float* __restrict__ non_trans,
-	const float offset,
-	const float thres,
-	const bool is_train)
+	const float offset,	// 0.015
+	const float thres,	// 4
+	const bool is_train,
+	
+	// added
+	float* __restrict__ radii_comp)
 {
 	// Identify current tile and associated min/max pixel range.
+	// 启动所有像素的线程，每个线程处理一个像素
+
+	// 获取线程在当前块的局部索引，通过 block.thread_index().x 和 block.thread_index().y 获取
+	// block.group_index().x 和 block.group_index().y 获取当前块的	二维全局索引
 	auto block = cg::this_thread_block();
+	// 计算 tile 的行数，向上取整
 	uint32_t horizontal_blocks = (W + BLOCK_X - 1) / BLOCK_X;
+	// pix_min = {当前块的索引x * 块width，当前块的索引y * 块height} = 该块的左上角（第一个像素坐标）
 	uint2 pix_min = { block.group_index().x * BLOCK_X, block.group_index().y * BLOCK_Y };
+	// 因为块是向上取整，因此最大像素可能在图片外，所以需要取图片的宽度和高度作为最小值
+	// pix_max = {min(当前块的索引x * 块width + 块width，图像宽度)，min(当前块的索引y * 块height + 块height，图像高度)} = 考虑图片下的该块的右下角（最后一个像素坐标）
+	// ~~~~ pixmax 暂时后续其实没有用到，所以 pix 还是需要判断是否在图片内
 	uint2 pix_max = { min(pix_min.x + BLOCK_X, W), min(pix_min.y + BLOCK_Y , H) };
+	// 根据像素的局部索引，计算当前像素的 二维全局坐标
+	// 当前 pix = {pix_min.x + 局部坐标x，pix_min.y + 局部坐标.y}
 	uint2 pix = { pix_min.x + block.thread_index().x, pix_min.y + block.thread_index().y };
+	// 计算当前像素的线性索引 idx
 	uint32_t pix_id = W * pix.y + pix.x;
+	// 用 float 保存当前像素 二维坐标
 	float2 pixf = { (float)pix.x, (float)pix.y };
 
 	// Check if this thread is associated with a valid pixel or outside.
-	bool inside = pix.x < W&& pix.y < H;
+	// 判断当前像素是否在图片内
+	bool inside = pix.x < W && pix.y < H;
 	// Done threads can help with fetching, but don't rasterize
+	// 如果不在，则不进行渲染，done = true
 	bool done = !inside;
 
 	// Load start/end range of IDs to process in bit sorted list.
+	/* 回忆 ranges 的含义：
+	 * 每个元素表示一个 tile 的按 深度排序后的 渲染高斯点 顺序索引范围
+	 */ 
 	uint2 range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
+	// 当前块需要处理的 循环次数，每一次循环考虑 BLOCK_SIZE 个 渲染高斯点，向上取整
 	const int rounds = ((range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE);
+	// 当前块总共需要处理的 渲染高斯点 数量
 	int toDo = range.y - range.x;
 
 	// Allocate storage for batches of collectively fetched data.
+	//！！！核心 ———— 共享内存 ！！！
+	/**
+	 * @attention __shared__ ———— 共享内存变量声明，表示这些变量是在一个线程块（block）内所有线程共享的一段内存
+	 * @attention BLOCK_SIZE ———— 每个线程块的线程数量
+	 */
+
+	// original
 	__shared__ int collected_id[BLOCK_SIZE];
-	__shared__ float collected_depth[BLOCK_SIZE];
 	__shared__ float2 collected_xy[BLOCK_SIZE];
 	__shared__ float4 collected_conic_opacity[BLOCK_SIZE];
+	
+	// added
+	__shared__ float collected_depth[BLOCK_SIZE];
 	__shared__ int collected_id_pointT[BLOCK_SIZE];
 	__shared__ float collected_depth_pointT[BLOCK_SIZE];
 	__shared__ float2 collected_xy_pointT[BLOCK_SIZE];
 	__shared__ float4 collected_conic_opacity_pointT[BLOCK_SIZE];
+
+	// added
+	__shared__ float collected_radii_comp[BLOCK_SIZE];
 
 	// Initialize helper variables
 	float T = 1.0f;
@@ -325,81 +395,80 @@ renderCUDA(
 	float depthT=0.0;
 	int i_pointT=0;
 	int progress_pointT = i_pointT * BLOCK_SIZE + block.thread_rank();
+	
+
+	/**
+	 * @brief 初始化 渲染高斯点 偏移索引
+	 * @details 这里在干什么？
+	 * 			前面初始化了公共变量，这里要把当前 tile 的 渲染高斯点加载到 共享内存中，供所有线程使用，
+	 * 			所以进行了以下两点优化：
+	 * 	 	    1. 当前块也就是tile的每个线程都并行加载一个 渲染高斯点 到 共享内存中，
+	 *          2. 每次只考虑 线程数量 个 渲染高斯点，而不是 当前块的 渲染高斯点数量，因此有 range.x + progress_pointT < range.y
+	 *          	- 这是完全合理的，因为我们的 渲染高斯点 是按深度排序并计算得，并且还有一些线程并不用考虑所有 渲染高斯点 就已经达到阈值，
+	 * 				- 因此 渲染高斯点 按深度分批加载并去计算每个线程也就是像素的最终值。
+	 * 
+	 * @attention block.thread_rank() ———— 当前块中当前线程的线性索引
+	 * @attention i_pointT ———— 当前块中所有线程共享的 渲染高斯点 批次偏移索引
+	 * @attention progress_pointT ———— 当前块中所有线程共享的 渲染高斯点 偏移索引
+	 */
+	// 如果 仍存在未计算的 渲染高斯点，则将 该渲染高斯点 属性索引、深度、二维坐标、椭圆参数 写入 共享内存
 	if (range.x + progress_pointT < range.y)
 	{
-		int coll_id = point_list[range.x + progress_pointT];
-		collected_id_pointT[block.thread_rank()] = coll_id;
-		collected_depth_pointT[block.thread_rank()] = depths[coll_id];
-		collected_xy_pointT[block.thread_rank()] = points_xy_image[coll_id];
-		collected_conic_opacity_pointT[block.thread_rank()] = conic_opacity[coll_id];
+		int coll_id = point_list[range.x + progress_pointT]; // 取出 高斯属性索引
+		collected_id_pointT[block.thread_rank()] = coll_id; // 写入 加载的 高斯点 属性索引
+		collected_depth_pointT[block.thread_rank()] = depths[coll_id]; // 写入 高斯对应的深度信息
+		collected_xy_pointT[block.thread_rank()] = points_xy_image[coll_id]; // 写入 高斯对应的 2D 坐标
+		// conic_opacity[idx] = (conic.x, conic.y, conic.z 2D 协方差矩阵的逆，conic.w 高斯点的不透明度，不透明度)
+		collected_conic_opacity_pointT[block.thread_rank()] = conic_opacity[coll_id]; // 写入 高斯对应的 2D 椭圆参数 
 	}
+	// 同步块内所有线程，确保所有线程都加载完 当前轮高斯点，等价于 __syncthreads()
+	// block.sync() 
 	block.sync();
+
+	
+	/**
+	 * @brief 利用当前 渲染高斯点 批次，对各像素 alpha-blending
+	 * 
+	 * @param i ———— 当前块的 第 i 次循环
+	 * @param toDo ———— 当前块总共 还需要处理的 渲染高斯点 数量
+	 * @param rounds ———— 当前块需要处理的 循环次数，每一次循环考虑 BLOCK_SIZE 个 渲染高斯点，向上取整
+	 * @param done ———— 当前线程/像素是否完成 当前批次任务
+	 */
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
 	{
 		// End if entire block votes that it is done rasterizing
+		/**
+		 * @brief 统计有多少个线程 done == true
+		 * 
+		 * @attention __syncthreads_count ———— 集体同步指令 + 条件统计
+		 * @else __syncthreads_and ———— 集体同步指令 + 条件与，__syncthreads_or ———— 集体同步指令 + 条件或
+		 */
 		int num_done = __syncthreads_count(done);
+		// 如果所有线程/像素都 done == true，即当前块完成渲染任务，则退出循环
 		if (num_done == BLOCK_SIZE)
 			break;
 
+
 		// Collectively fetch per-Gaussian data from global to shared
+		// 获取当前线程储存的 渲染高斯点 顺序索引
 		int progress = i * BLOCK_SIZE + block.thread_rank();
-		// speef of different thread can be different, so before fetch need a sync
+
 		block.sync();
+		
+		// 加载当前批次 渲染高斯点，则将 该渲染高斯点 属性索引、深度、二维坐标、椭圆参数 写入 共享内存
 		if (range.x + progress < range.y)
 		{
 			int coll_id = point_list[range.x + progress];
 			collected_id[block.thread_rank()] = coll_id;
 			collected_depth[block.thread_rank()] = depths[coll_id];
-			collected_xy[block.thread_rank()] = points_xy_image[coll_id];
+			collected_xy[block.thread_rank()] = points_xy_image[coll_id];	
 			collected_conic_opacity[block.thread_rank()] = conic_opacity[coll_id];
+			collected_radii_comp[block.thread_rank()] = radii_comp[coll_id]*1.1f; // 写入 高斯对应的 用于对比的 椭圆半径
 		}
 		block.sync();
-		
-		// if done, fetch but don't rasterize
-		if(done)
-		{
-			for (int j = 0; j < min(BLOCK_SIZE, toDo); j++)
-			{
-				// skip color and opacity calculation
-				// if now depth - offset point depth>offset
-				if(collected_depth[j]-depthT>offset)
-				{	
-					while(1)
-					{
-						// skip color and opacity calculation
-						// update offset point and offset point depth
-						depthT=collected_depth_pointT[pointT];
-						pointT=pointT+1;
-						if(pointT>=BLOCK_SIZE)
-						{
-							i_pointT+=1;
-							if(i_pointT<rounds)
-							{
-								block.sync();
-								progress_pointT = i_pointT * BLOCK_SIZE + block.thread_rank();
-								if (range.x + progress_pointT < range.y)
-								{
-									int coll_id = point_list[range.x + progress_pointT];
-									collected_id_pointT[block.thread_rank()] = coll_id;
-									collected_depth_pointT[block.thread_rank()] = depths[coll_id];
-									collected_xy_pointT[block.thread_rank()] = points_xy_image[coll_id];
-									collected_conic_opacity_pointT[block.thread_rank()] = conic_opacity[coll_id];
-								}
-								block.sync();
-							}
-							pointT=0;
-						}
-						if(collected_depth[j]-depthT<=offset)
-						{
-							break;
-						}
-					}
-					// skip T calculation and atomicAdd
-				}
-			}
-		}
 
 		// Else, iterate over current batch
+		// 开始作战！！！
 		for (int j = 0; !done && j < min(BLOCK_SIZE, toDo); j++)
 		{
 			contributor++;
@@ -407,40 +476,66 @@ renderCUDA(
 			float2 d_j = { xy_j.x - pixf.x, xy_j.y - pixf.y };
 			float dd=d_j.x*d_j.x+d_j.y*d_j.y;
 			float4 con_o_j = collected_conic_opacity[j];
+			// 该点高斯强度
 			float power_j = -0.5f * (con_o_j.x * d_j.x * d_j.x + con_o_j.z * d_j.y * d_j.y) - con_o_j.y * d_j.x * d_j.y;
 			
+			//vis_weight = exp(-(depth_j - depthT)² / σ²)
+			//float vis_weight = exp(-(collected_depth[j] - depthT) * (collected_depth[j] - depthT) / (offset * offset));
+			/**
+			 * 并没有采用逐个高斯点计算
+			 * 而是采用了 基于 depth difference 的间歇式计算 
+			 * 
+			 * 可以认为每隔 offset 更新一次遮挡值/透明度，而在 offset 区间内的高斯点，用上一次的遮挡值/透明度计算，中间并不实时更新新的遮挡值/透明度
+			 * 
+			 * 这是可以合理的，因为高斯点往往是互相覆盖的，
+			 * 		- 而采用实时逐个高斯去更新，不仅使计算量增大，并且更多不同像素之间  alpha blending 不产生更多的突变
+			 * 		- 控制「遮挡的敏感范围」（其实这里可以改进，高斯点附近的密度动态决定）
+			 * 		- 保证遮挡关系更柔和；* 
+			 */
 			// if now depth - offset point depth>offset
-			if(collected_depth[j]-depthT>offset)
+			if(collected_depth[j]-depthT>offset)	// depthT 刚开始为 0，所以第一个高斯点一定会进入循环
 			{	
 				while(1)
-				{
+				{	
+					// 计算当前像素位置 高斯的密度
 					float2 xy = collected_xy_pointT[pointT];
 					float2 d = { xy.x - pixf.x, xy.y - pixf.y };
 					float4 con_o = collected_conic_opacity_pointT[pointT];
 					float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
 					// update offset point and offset point depth
+					// 更新偏移点深度，刚开始更新为第一个高斯点深度
 					depthT=collected_depth_pointT[pointT];
 					pointT=pointT+1;
+					// 如果偏移点索引超过 BLOCK_SIZE，说明可以开始下一批高斯的计算
+					// 这里的共享内存放的是 偏移点 的 高斯点属性索引、深度、二维坐标、椭圆参数，和当前高斯点无关
+					// 但是，偏移点 肯定 是在 当前高斯点 之前，所以不用担心 i_pointT，让他自己加加加
+					// 并且所有线程统一从同样的高斯点开始，每个块共享一致的高斯点，因此偏移点的移动也是统一的，因此偏移点进入下一批的时机也是统一的
+					// 因此 不用担心死锁，也就是有个线程已经完成当前批次，却有的线程在这里等待
 					if(pointT>=BLOCK_SIZE)
 					{
 						i_pointT+=1;
-						if(i_pointT<rounds)
+						if(i_pointT<rounds)	// 未超出当前块的渲染高斯点数量
 						{
-							block.sync();
+							block.sync();	// 等待所有线程 进入 更换偏移点批次状态，即偏移点需要向更深处移动
+							// 获得当前线程需要加载的下一批中对应的 高斯点顺序索引
 							progress_pointT = i_pointT * BLOCK_SIZE + block.thread_rank();
+							// 由于向上取整，可能超出当前块的渲染高斯点数量，所以需要判断
 							if (range.x + progress_pointT < range.y)
-							{
+							{	
+								// 获得当前线程需要加载的下一批中对应的 高斯点属性索引
+								// 加载 高斯点属性索引、深度、二维坐标、椭圆参数
 								int coll_id = point_list[range.x + progress_pointT];
 								collected_id_pointT[block.thread_rank()] = coll_id;
 								collected_depth_pointT[block.thread_rank()] = depths[coll_id];
 								collected_xy_pointT[block.thread_rank()] = points_xy_image[coll_id];
 								collected_conic_opacity_pointT[block.thread_rank()] = conic_opacity[coll_id];
 							}
-							block.sync();
+							block.sync();	// 等待所有线程 加载新的数据
 						}
-						pointT=0;
+						pointT=0; // 下一批，因此回到起点，从0开始
 					}
 					contributor_pointT=contributor_pointT+1;
+					// 计算 alpha 值
 					float alpha=0.0;
 					if (power <= 0.0f)
 					{
@@ -449,14 +544,40 @@ renderCUDA(
 							alpha=0.0;
 					}
 					w = alpha * T;
-					float test_T = T * (1 - alpha);
+					float test_T = T * (1 - alpha); // 透过来的光比例
+
+					// 这里就是 间歇式判断 核心之一：
+					/*
+					 * 进入当前循环的 高斯点在刚开始 一定是 和 偏移点 深度差值 大于 offset 的
+					 * 因此肯定存在几轮循环中，不满足 collected_depth[j]-depthT<=offset 条件
+					 * 所以此时，T = test_T，回到开头，偏移点向深处移动，直到满足当前高斯点 和 偏移点 深度差值 小于 offset 的条件
+					 * （最深也就移动到当前高斯点，此时就像第一个高斯点一样，collected_depth[j]-depthT == 0）
+					 * 此时，进行 alpha-blending 更新当前高斯点，也就是当前高斯点，考虑了之前所有高斯点的累积光照值
+					 * 此时，T 更新为 test_T，退出循环，也就是进入 下一个阶段（为什么说下一个阶段？）
+					 * 
+					 * ~~~ （j+1 代表相较于当前循环的 下一个高斯点）
+					 * 
+					 * 在第二轮大循环中，也就是下一个当前高斯点，他可能满足 collected_depth[j+1]-depthT>offset
+					 * 那么此时 T 不更新，该高斯点继续只考虑上一个阶段的累积光照值，直到不满足 collected_depth[j+1]-depthT>offset
+					 * 也就是说，此时 偏移点 需要进一步向深处移动，光照值 T 也需要来到下一阶段，进行更新，
+					 * 直到 再满足 collected_depth[j+1]-depthT<=offset
+					 * 
+					 * ~~~
+					 * 
+					 * 所以说，这里采用了 基于 depth difference 的间歇式计算 
+					 * 遮挡值/透明度 并不是实时更新，而是每隔 (>=offset) 更新一次，是间歇式更新
+					 * 		- 在总结一下，就是 偏移点 和 当前高斯点 的深度差值 小于 offset 时，一直采用上一个阶段的累积透明度，
+					 * 		- 在 偏移点 和 当前高斯点 的深度差值 大于 offset 时，往深处移动偏移点，并更新 累积透明度，
+					 * 		- 直到下一阶段，也就是 偏移点 和 当前高斯点 的深度差值 小于 offset 时，使用新的累积透明度进行 光照值计算
+					*/ 
 					// if offset point is close enough to current point
 					if(collected_depth[j]-depthT<=offset)
 					{
-						if(dd<thres)
-						{
-							atomicAdd(&(out_trans[collected_id[j]]), exp(power_j)*T);
-							atomicAdd(&(non_trans[collected_id[j]]), exp(power_j));
+						if(dd<collected_radii_comp[j] && inside)
+						{	
+							// atomicAdd ———— 原子加法，确保多个线程对同一个变量进行操作时，操作是安全的，不会出现竞态条件
+							atomicAdd(&(out_trans[collected_id[j]]), exp(power_j)*T); // 当前高斯点的累积光照值（考虑遮挡）
+							atomicAdd(&(non_trans[collected_id[j]]), exp(power_j)); // 当前高斯点的理论最大光照值（不考虑遮挡）
 						}
 					}
 					T = test_T;
@@ -467,9 +588,11 @@ renderCUDA(
 					}
 				}
 			}
+
 			// if offset point and current point is close enough
+			// 这里就是 当高斯点与偏移点深度差值 小于 offset 时，则一直使用上一个阶段的累积透明度，进行光照值计算
 			else{
-				if(dd<thres)
+				if(dd<collected_radii_comp[j] && inside)
 				{
 					atomicAdd(&(out_trans[collected_id[j]]), exp(power_j)*T);
 					atomicAdd(&(non_trans[collected_id[j]]), exp(power_j));
@@ -481,7 +604,7 @@ renderCUDA(
 			last_contributor = contributor;
 
 			// Record accumulated weights
-			if(is_train){
+			if(is_train && inside){
 				atomicAdd(&out_weight[collected_id[j]], w);
 			}
 		}
@@ -515,8 +638,11 @@ void FORWARD::render(
 	const float offset,
 	const float thres,
 	const bool is_train)
-{
-	renderCUDA<NUM_CHANNELS> << <grid, block >> > (
+{	
+	// 瓦片并行渲染 -> 像素并行渲染
+	// 启动 grid*block 个线程，也就是像素数量（可能大于图像像素数量，因为向上取整）
+	// 每个 block 是一个 tile，每个线程处理 tile 中的一个像素，block 内线程共享内存协作完成该 tile 的像素渲染。
+	renderCUDA<NUM_CHANNELS> << <grid, block >> > ( 
 		ranges,
 		point_list,
 		W, H,

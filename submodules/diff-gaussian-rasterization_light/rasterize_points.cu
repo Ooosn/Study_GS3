@@ -29,6 +29,7 @@
 
 
 // char* 也许会认为是 字符串 的指针，但其实他也是最低级的指针类型，可用于 逐字节操作数据 的指针。
+// 指针的最小单位 是 字节，char* 是 1字节，可以保证 指针运算的正确性
 
 // 返回 std::function<char*(size_t N)>  类型 ————  返回一个 函数，这个函数接受一个 size_t 类型的参数 N，返回一个 char* 类型的指针。
 // 这个函数的作用是 ————  当需要调整张量 t 的大小时，使用这个函数来调整张量的大小，并返回一个指向调整后张量数据的指针。
@@ -147,6 +148,7 @@ RasterizeGaussiansCUDA(
   // torch::Device 和 torch::TensorOptions class 类型，（）内为构造函数声明
   torch::Device device(torch::kCUDA);
   torch::TensorOptions options(torch::kByte);
+
   // 初始化 三个缓冲区
   torch::Tensor geomBuffer = torch::empty({0}, options.device(device));
   torch::Tensor binningBuffer = torch::empty({0}, options.device(device));
@@ -172,6 +174,7 @@ RasterizeGaussiansCUDA(
 		M = sh.size(1);
       }
 
+
 	  // 调用 CudaRasterizer::Rasterizer::forward() 进行 CUDA 计算
 	  rendered = CudaRasterizer::Rasterizer::forward(
 
@@ -181,7 +184,9 @@ RasterizeGaussiansCUDA(
 		imgFunc,
 
 		// 输入参数
+		// 高斯点数量、sh 阶数、sh 系数数量
 	    P, degree, M,
+		// 背景颜色
 		background.contiguous().data<float>(),
 		// 图像高度和宽度
 		W, H,
@@ -201,14 +206,14 @@ RasterizeGaussiansCUDA(
 		prefiltered,
 
 		// return 的 四个张量
-		out_color.contiguous().data<float>(),
-		out_weight.contiguous().data<float>(),
-		radii.contiguous().data<int>(),
-		trans.contiguous().data<float>(),
+		out_color.contiguous().data<float>(),	// FORWARD::render 
+		out_weight.contiguous().data<float>(),	// FORWARD::render
+		radii.contiguous().data<int>(),		// FORWARD::preprocess
+		trans.contiguous().data<float>(),	// FORWARD::render
 
 		// 其他参数
 		debug,
-		non_trans.contiguous().data<float>(),
+		non_trans.contiguous().data<float>(),	// FORWARD::render, 也会被修改
 		offset,
 		thres,
 		is_train);

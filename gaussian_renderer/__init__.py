@@ -314,7 +314,8 @@ def render(viewpoint_camera,
                 print("i", i)
                 print("asg_1.shape", asg_1.shape)
             
-            decay, other_effects, asg_3 = gau.neural_phasefunc(wi, wo, gau.get_xyz, gau.get_neural_material, shadow.unsqueeze(-1), asg_1, asg_mlp) # (N, 1), (N, 3)
+            xyz = gau.get_xyz.detach()
+            decay, other_effects, asg_3 = gau.neural_phasefunc(wi, wo, xyz, gau.get_neural_material, shadow.unsqueeze(-1), asg_1, asg_mlp) # (N, 1), (N, 3)
             if debug:
                 print("asg_3.shape", asg_3.shape)
             specular = gau.get_ks * asg_3 # (N, 3)

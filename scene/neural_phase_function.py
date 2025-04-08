@@ -179,5 +179,5 @@ class Neural_phase(nn.Module):
         
         # torch.relu(decay - 1e-5) 如果 decay 过小，小于 1e-5，则设置为 0（因为相减后会为负）。
         # 这里应该除了为了减少计算开销，同时因为用的 leaky_relu 最后结果可能为负，所以需要用 relu 修正
-        decay = hint * decay
+        # decay = hint * decay
         return torch.relu(decay - 1e-5), other_effects, asg_3

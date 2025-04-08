@@ -245,9 +245,11 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	float lambda1 = mid + sqrt(max(0.1f, mid * mid - det));
 	float lambda2 = mid - sqrt(max(0.1f, mid * mid - det));
 	float my_radius = 3.f * sqrt(max(lambda1, lambda2));
+	float my_radius_ceil = ceil(my_radius);
 	float2 point_image = { ndc2Pix(p_proj.x, W), ndc2Pix(p_proj.y, H) };
 	uint2 rect_min, rect_max;
-	getRect(point_image, my_radius, rect_min, rect_max, grid);
+	// 用 圆心 加减 3*最长轴，得到 矩形范围，其实相当于先获得圆，然后获得包裹圆的矩形
+	getRect(point_image, my_radius_ceil, rect_min, rect_max, grid);
 	if ((rect_max.x - rect_min.x) * (rect_max.y - rect_min.y) == 0)
 		return;
 
@@ -265,7 +267,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	// change the z dist to the dist to camera center
 	// 这里计算的是 高斯点到相机中心的距离，原代码是 z 轴距离，因为我们要计算向光源点的遮挡，深度排序
 	depths[idx] = p_view.z*p_view.z+p_view.y*p_view.y+p_view.x*p_view.x;
-	radii[idx] = ceil(my_radius);
+	radii[idx] = my_radius_ceil;
 	radii_comp[idx] = my_radius;
 	points_xy_image[idx] = point_image;
 	// Inverse 2D covariance and opacity neatly pack into one float4
@@ -316,7 +318,7 @@ renderCUDA(
 	const bool is_train,
 	
 	// added
-	float* __restrict__ radii_comp)
+	const float* __restrict__ radii_comp)
 {
 	// Identify current tile and associated min/max pixel range.
 	// 启动所有像素的线程，每个线程处理一个像素
@@ -395,7 +397,12 @@ renderCUDA(
 	float depthT=0.0;
 	int i_pointT=0;
 	int progress_pointT = i_pointT * BLOCK_SIZE + block.thread_rank();
-	
+
+	// addded
+	float temp = 1.0f;
+	float depth_diff = 0.0f;
+	float test_T2 = 0.0f;
+	float alpha=0.0f;
 
 	/**
 	 * @brief 初始化 渲染高斯点 偏移索引
@@ -411,7 +418,8 @@ renderCUDA(
 	 * @attention i_pointT ———— 当前块中所有线程共享的 渲染高斯点 批次偏移索引
 	 * @attention progress_pointT ———— 当前块中所有线程共享的 渲染高斯点 偏移索引
 	 */
-	// 如果 仍存在未计算的 渲染高斯点，则将 该渲染高斯点 属性索引、深度、二维坐标、椭圆参数 写入 共享内存
+	// 初始化 偏移点 相关数据，和 渲染高斯点无关
+	// 下面会详细解释什么是偏移点
 	if (range.x + progress_pointT < range.y)
 	{
 		int coll_id = point_list[range.x + progress_pointT]; // 取出 高斯属性索引
@@ -425,7 +433,6 @@ renderCUDA(
 	// block.sync() 
 	block.sync();
 
-	
 	/**
 	 * @brief 利用当前 渲染高斯点 批次，对各像素 alpha-blending
 	 * 
@@ -463,54 +470,67 @@ renderCUDA(
 			collected_depth[block.thread_rank()] = depths[coll_id];
 			collected_xy[block.thread_rank()] = points_xy_image[coll_id];	
 			collected_conic_opacity[block.thread_rank()] = conic_opacity[coll_id];
-			collected_radii_comp[block.thread_rank()] = radii_comp[coll_id]*1.1f; // 写入 高斯对应的 用于对比的 椭圆半径
+			collected_radii_comp[block.thread_rank()] = thres ==-1 ? radii_comp[coll_id]*1.1f : thres; 
+			
+			// 写入 高斯对应的 用于对比的 椭圆半径
+
+			
 		}
 		block.sync();
 
 		// Else, iterate over current batch
 		// 开始作战！！！
-		for (int j = 0; !done && j < min(BLOCK_SIZE, toDo); j++)
-		{
+		for (int j = 0; j < min(BLOCK_SIZE, toDo); j++)
+		{	
 			contributor++;
+			
+			// 当前线程/像素位置下，当前循环渲染高斯点密度 ———— power_j
 			float2 xy_j = collected_xy[j];
 			float2 d_j = { xy_j.x - pixf.x, xy_j.y - pixf.y };
 			float dd=d_j.x*d_j.x+d_j.y*d_j.y;
 			float4 con_o_j = collected_conic_opacity[j];
-			// 该点高斯强度
 			float power_j = -0.5f * (con_o_j.x * d_j.x * d_j.x + con_o_j.z * d_j.y * d_j.y) - con_o_j.y * d_j.x * d_j.y;
 			
 			//vis_weight = exp(-(depth_j - depthT)² / σ²)
 			//float vis_weight = exp(-(collected_depth[j] - depthT) * (collected_depth[j] - depthT) / (offset * offset));
 			/**
-			 * 并没有采用逐个高斯点计算
-			 * 而是采用了 基于 depth difference 的间歇式计算 
+			 * @brief 并没有采用逐个高斯点计算，而是采用了 基于 depth difference 的间歇式计算 
 			 * 
-			 * 可以认为每隔 offset 更新一次遮挡值/透明度，而在 offset 区间内的高斯点，用上一次的遮挡值/透明度计算，中间并不实时更新新的遮挡值/透明度
+			 * @details 可以认为高斯点只收到 offset 距离外的高斯点遮挡，而在 offset 区间内的高斯点对其影响忽略，即并不实时参与更新当前的遮挡值/透明度
+			 * @attention 下面分支中判断部分会详细解释
 			 * 
-			 * 这是可以合理的，因为高斯点往往是互相覆盖的，
-			 * 		- 而采用实时逐个高斯去更新，不仅使计算量增大，并且更多不同像素之间  alpha blending 不产生更多的突变
-			 * 		- 控制「遮挡的敏感范围」（其实这里可以改进，高斯点附近的密度动态决定）
-			 * 		- 保证遮挡关系更柔和；* 
+			 * @note 这是可以合理的，因为 3D高斯点 往往是互相覆盖的，
+			 * 		 - 而采用实时逐个高斯去更新，不仅使计算量增大，并且更多不同像素之间  alpha blending 不产生更多的突变
+			 * 		 - 控制「遮挡的敏感范围」（其实这里可以改进，高斯点附近的密度动态决定）
+			 * 		 - 保证遮挡关系更柔和；* 
 			 */
 			// if now depth - offset point depth>offset
-			if(collected_depth[j]-depthT>offset)	// depthT 刚开始为 0，所以第一个高斯点一定会进入循环
+			depth_diff = collected_depth[j]-depthT;
+			if(depth_diff>offset)	// depthT 刚开始为 0，所以第一个高斯点一定会进入循环
 			{	
 				while(1)
 				{	
-					// 计算当前像素位置 高斯的密度
+					
+					T = T * temp;
+					// 计算当前循环中 偏移点 的 密度
 					float2 xy = collected_xy_pointT[pointT];
 					float2 d = { xy.x - pixf.x, xy.y - pixf.y };
 					float4 con_o = collected_conic_opacity_pointT[pointT];
 					float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
+
 					// update offset point and offset point depth
 					// 更新偏移点深度，刚开始更新为第一个高斯点深度
 					depthT=collected_depth_pointT[pointT];
 					pointT=pointT+1;
-					// 如果偏移点索引超过 BLOCK_SIZE，说明可以开始下一批高斯的计算
-					// 这里的共享内存放的是 偏移点 的 高斯点属性索引、深度、二维坐标、椭圆参数，和当前高斯点无关
-					// 但是，偏移点 肯定 是在 当前高斯点 之前，所以不用担心 i_pointT，让他自己加加加
-					// 并且所有线程统一从同样的高斯点开始，每个块共享一致的高斯点，因此偏移点的移动也是统一的，因此偏移点进入下一批的时机也是统一的
-					// 因此 不用担心死锁，也就是有个线程已经完成当前批次，却有的线程在这里等待
+
+					/**
+					 * @brief 如果偏移点索引超过 BLOCK_SIZE，说明可以开始下一批高斯的计算
+					 * 
+					 * @attention 这里的共享内存放的是 偏移点 的 高斯点属性索引、深度、二维坐标、椭圆参数，和当前高斯点无关
+					 * @note 1. 偏移点 肯定 是在 当前高斯点 之前，所以不用担心 i_pointT，让他自己加加加
+					 * 		 2. 并且所有线程统一从同样的高斯点开始，每个块共享一致的高斯点（不考虑范围，只考虑深度），因此偏移点的移动也是统一的，因此偏移点进入下一批的时机也是统一的
+					 * 		 >>> 因此 不用担心死锁，也就是有个线程已经完成当前批次，却有的线程在这里等待
+					 */ 
 					if(pointT>=BLOCK_SIZE)
 					{
 						i_pointT+=1;
@@ -535,57 +555,68 @@ renderCUDA(
 						pointT=0; // 下一批，因此回到起点，从0开始
 					}
 					contributor_pointT=contributor_pointT+1;
-					// 计算 alpha 值
-					float alpha=0.0;
-					if (power <= 0.0f)
+
+					// 计算 当前循环高斯点 的 密度/不透明度
+					alpha=0.0;
+					if (power <= 0.0f)	// 消除精度误差带来的影响
 					{
-						alpha = min(0.99f, con_o.w * exp(power));
-						if (alpha < 1.0f / 255.0f)
+						alpha = min(0.99f, con_o.w * exp(power));	// 增强过渡
+						if (alpha < 1.0f / 255.0f)	// 过小剔除
 							alpha=0.0;
 					}
-					w = alpha * T;
-					float test_T = T * (1 - alpha); // 透过来的光比例
+					w = alpha * T;	// 当前高斯点 的 贡献值
+					// alpha ———— 密度 = 不透明度
+					// 1-alpha ———— 当前循环点的 透明度/剩余透过率
+					temp = (1 - alpha); // 准备进行一个 线性插值 来更新 T，因此 当前高斯点和偏移点 的 距离可能过近，因此进行适当平衡
+					
+					// T = T * temp ———— 考虑当前偏移点位置下的 遮挡 后，剩余透过率
 
 					// 这里就是 间歇式判断 核心之一：
-					/*
+					/**
+					 * @details：
 					 * 进入当前循环的 高斯点在刚开始 一定是 和 偏移点 深度差值 大于 offset 的
 					 * 因此肯定存在几轮循环中，不满足 collected_depth[j]-depthT<=offset 条件
 					 * 所以此时，T = test_T，回到开头，偏移点向深处移动，直到满足当前高斯点 和 偏移点 深度差值 小于 offset 的条件
 					 * （最深也就移动到当前高斯点，此时就像第一个高斯点一样，collected_depth[j]-depthT == 0）
-					 * 此时，进行 alpha-blending 更新当前高斯点，也就是当前高斯点，考虑了之前所有高斯点的累积光照值
-					 * 此时，T 更新为 test_T，退出循环，也就是进入 下一个阶段（为什么说下一个阶段？）
+					 * 此时，进行 alpha-blending 更新当前高斯点，也就是当前高斯点，考虑了之前所有高斯点的剩余透射率
+					 * 此时，T 更新为 test_T，退出循环
 					 * 
 					 * ~~~ （j+1 代表相较于当前循环的 下一个高斯点）
 					 * 
 					 * 在第二轮大循环中，也就是下一个当前高斯点，他可能满足 collected_depth[j+1]-depthT>offset
 					 * 那么此时 T 不更新，该高斯点继续只考虑上一个阶段的累积光照值，直到不满足 collected_depth[j+1]-depthT>offset
-					 * 也就是说，此时 偏移点 需要进一步向深处移动，光照值 T 也需要来到下一阶段，进行更新，
+					 * 也就是说，此时 偏移点 需要进一步向深处移动，剩余透射率 T 也需要进行更新，
 					 * 直到 再满足 collected_depth[j+1]-depthT<=offset
+					 * 所以也就是 偏移点 在跟进 当前高斯点，两者之间时刻保持 offset 左右距离
 					 * 
 					 * ~~~
 					 * 
-					 * 所以说，这里采用了 基于 depth difference 的间歇式计算 
-					 * 遮挡值/透明度 并不是实时更新，而是每隔 (>=offset) 更新一次，是间歇式更新
-					 * 		- 在总结一下，就是 偏移点 和 当前高斯点 的深度差值 小于 offset 时，一直采用上一个阶段的累积透明度，
-					 * 		- 在 偏移点 和 当前高斯点 的深度差值 大于 offset 时，往深处移动偏移点，并更新 累积透明度，
-					 * 		- 直到下一阶段，也就是 偏移点 和 当前高斯点 的深度差值 小于 offset 时，使用新的累积透明度进行 光照值计算
+					 * 所以说，这里采用了 基于 depth difference 的计算 
+					 * 遮挡值/透明度 并不是实时更新，而是根据距离选择更新
+					 * 		- 在总结一下，就是 偏移点 和 当前高斯点 的深度差值 小于 offset 时，一直采用上一个偏移点的剩余透射率，
+					 * 		- 在 偏移点 和 当前高斯点 的深度差值 大于 offset 时，往深处移动偏移点，并更新 剩余透射率 T，
+					 * 		- 直到 偏移点 和 当前高斯点 的深度差值 小于 offset 时，使用新偏移点的剩余透射率 T 进行计算
+					 * >>> 也就是说，一直考虑 当前高斯点 offset 左右距离外 的剩余透射率，而不是考虑所有在自己前面的所有高斯点的遮挡
 					*/ 
+
 					// if offset point is close enough to current point
-					if(collected_depth[j]-depthT<=offset)
+					depth_diff = collected_depth[j]-depthT;
+					if(depth_diff<=offset)
 					{
 						if(dd<collected_radii_comp[j] && inside)
-						{	
-							// atomicAdd ———— 原子加法，确保多个线程对同一个变量进行操作时，操作是安全的，不会出现竞态条件
-							atomicAdd(&(out_trans[collected_id[j]]), exp(power_j)*T); // 当前高斯点的累积光照值（考虑遮挡）
-							atomicAdd(&(non_trans[collected_id[j]]), exp(power_j)); // 当前高斯点的理论最大光照值（不考虑遮挡）
+						{   
+							atomicAdd(&(out_trans[collected_id[j]]), exp(power_j)*(T*(1-(depth_diff/offset) + (depth_diff/offset)*temp)));
+							atomicAdd(&(non_trans[collected_id[j]]), exp(power_j));
 						}
-					}
-					T = test_T;
-					// if offset point and current point is close enough, stop while
-					if(collected_depth[j]-depthT<=offset)
-					{
 						break;
 					}
+
+
+					// T = test_T  // 原 code 位置
+					// if(collected_depth[j]-depthT<=offset) {break;}
+					
+
+
 				}
 			}
 
@@ -594,7 +625,7 @@ renderCUDA(
 			else{
 				if(dd<collected_radii_comp[j] && inside)
 				{
-					atomicAdd(&(out_trans[collected_id[j]]), exp(power_j)*T);
+					atomicAdd(&(out_trans[collected_id[j]]), exp(power_j)*(T*(1-(depth_diff/offset) + (depth_diff/offset)*temp)));
 					atomicAdd(&(non_trans[collected_id[j]]), exp(power_j));
 				}
 			}
@@ -619,6 +650,9 @@ renderCUDA(
 	}
 }
 
+// 作用1：格式化
+// 作用2：可以转换数据格式，满足函数签名，比如 float 为 const float*，核函数不支持 T 传入 const T
+
 void FORWARD::render(
 	const dim3 grid, dim3 block,
 	const uint2* ranges,
@@ -637,7 +671,8 @@ void FORWARD::render(
 	float* non_trans,
 	const float offset,
 	const float thres,
-	const bool is_train)
+	const bool is_train,
+	const float* radii_comp)
 {	
 	// 瓦片并行渲染 -> 像素并行渲染
 	// 启动 grid*block 个线程，也就是像素数量（可能大于图像像素数量，因为向上取整）
@@ -659,7 +694,8 @@ void FORWARD::render(
 		non_trans,
 		offset,
 		thres,
-		is_train);
+		is_train,
+		radii_comp);
 }
 
 void FORWARD::preprocess(int P, int D, int M,
@@ -686,7 +722,8 @@ void FORWARD::preprocess(int P, int D, int M,
 	float4* conic_opacity,
 	const dim3 grid,
 	uint32_t* tiles_touched,
-	bool prefiltered)
+	bool prefiltered,
+	float* radii_comp)
 {
 	preprocessCUDA<NUM_CHANNELS> << <(P + 255) / 256, 256 >> > (
 		P, D, M,
@@ -713,6 +750,6 @@ void FORWARD::preprocess(int P, int D, int M,
 		conic_opacity,
 		grid,
 		tiles_touched,
-		prefiltered
-		);
+		prefiltered,
+		radii_comp);
 }

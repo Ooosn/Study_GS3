@@ -45,7 +45,10 @@ namespace FORWARD
 		float4* conic_opacity,
 		const dim3 grid,
 		uint32_t* tiles_touched,
-		bool prefiltered);
+		bool prefiltered,
+		
+		//added
+		float* radii_comp);
 
 	// Main rasterization method.
 	void render(
@@ -66,7 +69,10 @@ namespace FORWARD
 		float* non_trans,
 		const float offset,
 		const float thres,
-    	const bool is_train);
+    	const bool is_train,
+		
+		//added
+		const float* radii_comp);
 }
 
 

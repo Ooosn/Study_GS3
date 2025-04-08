@@ -106,6 +106,27 @@ def get_expon_lr_func(
     return helper
 
 """
+作用：
+    直接计算并返回给定 step 的学习率。
+"""
+def get_expon_lr(step, lr_init, lr_final, lr_delay_steps=0, lr_delay_mult=1.0, max_steps=1000000):
+    if step < 0 or (lr_init == 0.0 and lr_final == 0.0):
+            # Disable this parameter
+            return 0.0
+    #判断是否存在延迟步数
+    if lr_delay_steps > 0:
+        # A kind of reverse cosine decay.
+        delay_rate = lr_delay_mult + (1 - lr_delay_mult) * np.sin(
+            0.5 * np.pi * np.clip(step / lr_delay_steps, 0, 1)
+        )    #判断当前步数延迟系数，随着步数接近延迟步数逐渐增大，最终变为1
+    else:
+        delay_rate = 1.0
+    #开始衰减
+    t = np.clip(step / max_steps, 0, 1)   #用于学习率指数衰减(1)
+    log_lerp = np.exp(np.log(lr_init) * (1 - t) + np.log(lr_final) * t)  #用于学习率指数衰减(2)
+    return delay_rate * log_lerp   #延迟系数乘以当前学习率
+
+"""
 从Lbatch中提取每一个矩阵的上三角部分，按顺序存入每一行。
 
 参数：

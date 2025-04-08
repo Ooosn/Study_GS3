@@ -53,19 +53,44 @@ class GaussianModel:
         self.mm_asg_aplha_activation = torch.nn.Softplus()
 
 
-    def __init__(self, 
-                 sh_degree : int, 
-                 use_MBRDF=False, 
-                 basis_asg_num=8, 
-                 hidden_feature_size=32, 
-                 hidden_feature_layer=3, 
-                 phase_frequency=4, 
-                 neural_material_size=6, 
-                 maximum_gs=1_000_000,
-                 asg_channel_num=1,
-                 asg_mlp=False,
-                 mlp_zero=False):
+    def __init__(self, modelset, opt=None):
+
+        # passed parameters <- modelset
+        sh_degree            = getattr(modelset, "sh_degree", 0)
+        use_MBRDF            = getattr(modelset, "use_nerual_phasefunc", False)
+        basis_asg_num        = getattr(modelset, "basis_asg_num", 8)
+        hidden_feature_size  = getattr(modelset, "phasefunc_hidden_size", 32)
+        hidden_feature_layer = getattr(modelset, "phasefunc_hidden_layers", 3)
+        phase_frequency      = getattr(modelset, "phasefunc_frequency", 4)
+        neural_material_size = getattr(modelset, "neural_material_size", 6)
+        maximum_gs           = getattr(modelset, "maximum_gs", 1_000_000)
+
+        asg_channel_num      = getattr(modelset, "asg_channel_num", 1)  # 控制 ASG 的高光基函数通道数量
+        asg_mlp              = getattr(modelset, "asg_mlp", False)  # 控制是否使用 ASG MLP，通过神经材料参数修正最终高光通道
+        alpha_change         = getattr(modelset, "alpha_change", False)  # 控制是否在训练过程中改变 alpha_asg 的维度，从1变为3
+        asg_alpha_num        = getattr(modelset, "asg_alpha_num", 1)  # 控制开始的 alpha_asg 的维度，从1变为3
+
+        # 检查参数设置
+        if alpha_change and asg_alpha_num == 3:
+            assert asg_channel_num == 1, "alpha_change 和 asg_alpha_num 不能同时启动"
+        if asg_channel_num == 3 and asg_alpha_num == 3:
+            print("attention: alpha 通道和 alpha_asg 基函数维度同时为 3")
+        elif asg_alpha_num == 3:
+            print("attention: 仅 alpha_asg 基函数维度为 3")
+        elif asg_channel_num == 3:
+            print("attention: 仅 alpha 通道为 3")
+
+        # passed parameters <- opt
+        mlp_zero            = getattr(opt, "mlp_zero", False)
         
+        # 检查参数设置
+        if asg_mlp:
+            print("attention: 使用 ASG MLP 修正高光通道")
+        if mlp_zero:
+            print("attention: 所有 MLP 采用 zero 初始化")
+
+
+        # initialize parameters
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree  
         # 高斯点云坐标
@@ -80,10 +105,11 @@ class GaussianModel:
         # ASG params
         self.basis_asg_num = basis_asg_num
         self.asg_channel_num = asg_channel_num
+        self.asg_mlp = asg_mlp
+        self.asg_alpha_num = asg_alpha_num
+        self.alpha_change = alpha_change
         self.alpha_asg = torch.empty(0)
         self.asg_func = torch.empty(0)
-        self.asg_mlp = asg_mlp
-        self.asg_alpha_num = 1
 
         # neural phase function
         self.mlp_zero = mlp_zero
@@ -119,6 +145,9 @@ class GaussianModel:
 
         # debug 专用
         self.global_call_counter = 0
+
+        # mine
+        self.use_hgs = False
 
     def capture(self):
         return {
@@ -346,12 +375,12 @@ class GaussianModel:
 
             # 基于 ASG (Anisotropic Spherical Gaussians)，混合多个 ASG 以逼近复杂的高光形状
             # 这里 channel_num 是 ASG 的通道数量，用于控制 ASG 的输出维度
-            alpha_asg = torch.zeros((features.shape[0], self.basis_asg_num, 1), dtype=torch.float, device="cuda")
+            alpha_asg = torch.zeros((features.shape[0], self.basis_asg_num, self.asg_alpha_num), dtype=torch.float, device="cuda")
             self.alpha_asg = nn.Parameter(alpha_asg.requires_grad_(True))
             
             self.asg_func = Mixture_of_ASG(self.basis_asg_num, self.asg_channel_num)  # forward(self, wi, wo, alpha_asg, asg_scales, asg_axises):
             
-            # 局部旋转四元数（修正 wi 和 wo）
+            # 计算 高斯局部坐标系，用于 asg 相关计算
             local_rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
             local_rots[:, 0] = 1
             self.local_q = nn.Parameter(local_rots.requires_grad_(True))
@@ -372,9 +401,9 @@ class GaussianModel:
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
-    def start_alpha_asg(self, alpha_asg):
-        alpha_asg_channel = alpha_asg.repeat(1, 1, 3)
-        self.alpha_asg = nn.Parameter(alpha_asg_channel.requires_grad_(True))
+    def change_alpha_asg(self, alpha_asg):
+        alpha_asg_3 = alpha_asg.repeat(1, 1, 3)
+        self.alpha_asg = nn.Parameter(alpha_asg_3.requires_grad_(True))
         
         for group in self.optimizer.param_groups:
             if group["name"] == "alpha_asg":
@@ -382,8 +411,8 @@ class GaussianModel:
                 stored_state = self.optimizer.state.get(group['params'][0], None)
 
                 if stored_state is not None:    # 保险起见，虽然不可能
-                    stored_state["exp_avg"] = torch.zeros_like(alpha_asg_channel)
-                    stored_state["exp_avg_sq"] = torch.zeros_like(alpha_asg_channel)
+                    stored_state["exp_avg"] = torch.zeros_like(alpha_asg_3)
+                    stored_state["exp_avg_sq"] = torch.zeros_like(alpha_asg_3)
 
                     del self.optimizer.state[group["params"][0]]
                 
@@ -636,12 +665,13 @@ class GaussianModel:
             alpha_asg_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("alpha_asg_")]
             # 先按 Basis dim = 1 排序，再按 channel dim = 2 排序
             alpha_asg_names = sorted(alpha_asg_names, key = lambda x: (int(x.split('_')[-2]), int(x.split('_')[-1])))
-            print(len(alpha_asg_names))
-            print(self.basis_asg_num)
-            print(self.asg_channel_num)
-            assert len(alpha_asg_names) == self.basis_asg_num * self.asg_channel_num
+            if self.alpha_change:
+                asg_alpha_num = 3
+            else:
+                asg_alpha_num = self.asg_alpha_num
+            assert len(alpha_asg_names) == self.basis_asg_num * asg_alpha_num, f"alpha_asg_names 数量与 basis_asg_num 和 asg_alpha_num 不匹配: {len(alpha_asg_names)} != {self.basis_asg_num} * {asg_alpha_num}"
             
-            alpha_asg = np.zeros((xyz.shape[0], self.basis_asg_num, self.asg_channel_num))
+            alpha_asg = np.zeros((xyz.shape[0], self.basis_asg_num, asg_alpha_num))
             for attr_name in alpha_asg_names:
                 basis, channel = map(int, attr_name.split('_')[-2:])  # 解析通道索引 j 和 Basis 索引 i
                 alpha_asg[:, basis, channel] = np.asarray(plydata.elements[0][attr_name])  # 赋值到正确位置

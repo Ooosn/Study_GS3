@@ -22,6 +22,7 @@ from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh
 from utils.graphics_utils import getProjectionMatrix, look_at
 import time
+from utils.general_utils import  get_expon_lr
 
 
 debug = False
@@ -42,7 +43,8 @@ def render(viewpoint_camera,
            inten_scale = 1.0,   # 颜色强度缩放，但是感觉被弃用了
            is_train = False,    # 根据 prune_visibility
            simplify = False,    # 简化代码，没啥用
-           asg_mlp = False): 
+           asg_mlp = False,
+           iteration = 0): 
     
     """
     Render the scene. 
@@ -166,26 +168,38 @@ def render(viewpoint_camera,
         """
         !!! 阴影 shadow 从已有的高斯场景信息计算的，不是用来优化高斯本身，因此这里不能有梯度 
         """   
-        # with torch.cuda.stream(light_stream):   # 在光源流中进行计算 # 撤销，有bug
+        # with torch.cuda.stream(light_stream):   # 在光源流中进行计算 # 撤销，由于 cub 等库的原因，需要显式声明流，懒得改了
         """
         !!! 怀疑 GaussianRasterizer_light 中的某些操作绑定了固定流，因此采用异步时，一些流可能绑定了新流，一些流依然在旧流中
         !!! 因此出现 流竞争问题，后续需要改进
         """
+
+
         rasterizer_light = GaussianRasterizer_light(raster_settings=raster_settings_light)
         opacity_light = torch.zeros(scales.shape[0], dtype=torch.float32, device=scales.device)
-        _, out_weight, _, shadow = rasterizer_light(
-            means3D = means3D,
-            means2D = means2D,
-            shs = None,
-            colors_precomp = torch.zeros((2, 3), dtype=torch.float32, device=scales.device),
-            opacities = opacity,
-            scales = scales,
-            rotations = rotations,
-            cov3D_precomp = cov3D_precomp,
-            non_trans = opacity_light,  # 会改变 opacity_light 的值
-            offset = 0.015,
-            thres = 4,
-            is_train = is_train)
+        light_inputs = {
+            "means3D": means3D,
+            "means2D": means2D,
+            "shs": None,
+            "colors_precomp": torch.zeros((2, 3), dtype=torch.float32, device=scales.device),
+            "opacities": opacity,
+            "scales": scales,
+            "rotations": rotations,
+            "cov3D_precomp": cov3D_precomp,
+            "non_trans": opacity_light,
+            "offset": 0.015,
+            "thres": -1,
+            "is_train": is_train
+        }
+
+        if gau.use_hgs:
+            shadow, out_weight = DifferentiableShadow.apply(gau.halfnorm, *light_inputs, rasterizer_light)
+        else:
+            _, out_weight, _, shadow = rasterizer_light(**light_inputs)
+
+    
+
+
 
     # 4）光源方向的高斯泼溅 ———— ① 计算最终阴影 ② 计算其他效果 ③ 计算高斯点的最终颜色:
 
@@ -299,6 +313,7 @@ def render(viewpoint_camera,
                 print("param", param)
                 print("i", i)
                 print("asg_1.shape", asg_1.shape)
+            
             decay, other_effects, asg_3 = gau.neural_phasefunc(wi, wo, gau.get_xyz, gau.get_neural_material, shadow.unsqueeze(-1), asg_1, asg_mlp) # (N, 1), (N, 3)
             if debug:
                 print("asg_3.shape", asg_3.shape)
@@ -444,3 +459,62 @@ def _NdotWi(nrm, wi, elu, a):
     """
     tmp  = a * (1. - 1 / math.e)
     return (elu(_dot(nrm, wi)) + tmp) / (1. + tmp)
+
+
+# 模拟 backward 实现
+class DifferentiableShadow(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, n, rasterizer_light, other_inputs):
+        """
+        n: (N, 3)
+        """
+        global iteration 
+        eps = 1e-4
+        if False:
+            eps = get_expon_lr(iteration, lr_init= 1e-4,
+                                                    lr_final=1e-6,
+                                                    lr_delay_steps=30000,
+                                                    lr_delay_mult=0.01,
+                                                    max_steps=1000000)
+        grad_shadow_n = torch.zeros_like(n)  # [N, 3]
+        n = n.unsqueeze(1)  # [N, 1, 3]     # RASTERIZER_LIGHT 需要 (N, ?, 3) 的输入
+
+        if True:
+            for i in range(3):
+                offset = torch.zeros_like(n)
+                offset[:, :, i] = eps
+                shadow_pos = rasterizer_light(**other_inputs, hgs_normal=n + offset)    # [N, 1]
+                shadow_neg = rasterizer_light(**other_inputs, hgs_normal=n - offset)    # [N, 1]
+                grad_shadow_n[:, i] = (shadow_pos - shadow_neg) / (2 * eps)  # 计算分量梯度
+
+            # 正常 forward
+            _, out_weight, _, shadow = rasterizer_light(**other_inputs, hgs_normal=n)
+
+
+        else:
+            n = n.repeat(1, 7, 1)
+            n[:, 0, 0] = n[:, 0, 0] + eps
+            n[:, 1, 0] = n[:, 1, 0] - eps
+            n[:, 2, 1] = n[:, 2, 1] + eps
+            n[:, 3, 1] = n[:, 3, 1] - eps
+            n[:, 4, 2] = n[:, 4, 2] + eps
+            n[:, 5, 2] = n[:, 5, 2] - eps
+
+            shadow = rasterizer_light(**other_inputs, hgs_normal=n)    # [N,7]
+            for i in range(3):
+                grad_shadow_n[:, i] = (shadow[:, 2*i] - shadow[:, 2*i+1]) / (2 * eps)  # 计算分量梯度
+
+            shadow = shadow[:, 6]
+
+
+        # 保存梯度用于 backward
+        ctx.save_for_backward(grad_shadow_n)
+        return shadow, out_weight     # [N,1], [N,1]
+
+    @staticmethod
+    def backward(ctx, grad_output_shadow, grad_output_weight):
+        (grad_shadow_n,) = ctx.saved_tensors  # [N, 3]
+        grad_output_shadow = grad_output_shadow.view(-1, 1)  # [N, 1]
+        grad_n = grad_output_shadow * grad_shadow_n         # [N, 1] * [N, 3] = [N, 3]
+        return grad_n, None, None
+

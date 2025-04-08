@@ -33,18 +33,14 @@ except ImportError:
 asgmlp_debug = True
 
 #training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.unfreeze_iterations, args.debug_from)
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, unfreeze_iterations, debug_from):
+def training(modelset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, unfreeze_iterations, debug_from):
     first_iter = 0
 
     # 准备输出和日志记录器，更新模型路径
-    tb_writer = prepare_output_and_logger(dataset)
+    tb_writer = prepare_output_and_logger(modelset)
 
     # 初始化高斯实例
-    gaussians = GaussianModel(dataset.sh_degree, use_MBRDF=dataset.use_nerual_phasefunc, basis_asg_num=dataset.basis_asg_num, \
-                            hidden_feature_size=dataset.phasefunc_hidden_size, hidden_feature_layer=dataset.phasefunc_hidden_layers, \
-                            phase_frequency=dataset.phasefunc_frequency, neural_material_size=dataset.neural_material_size,
-                            maximum_gs=dataset.maximum_gs, asg_channel_num=dataset.asg_channel_num, asg_mlp=dataset.asg_mlp, \
-                            mlp_zero=opt.mlp_zero)
+    gaussians = GaussianModel(modelset, opt)
 
     # 根据 训练args，优化args 以及 初始高斯 建立场景实例，最终的高斯实例
     """
@@ -54,7 +50,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         2. 加载高斯模型，如果加载旧模型则直接从点云中加载高斯模型，否则从场景信息的点云信息中创建高斯模型
         3. 根据命令行参数判断是否需要添加优化相机参数和光源参数
     """
-    scene = Scene(dataset, gaussians, opt=opt, shuffle=True)
+    scene = Scene(modelset, gaussians, opt=opt, shuffle=True)
     
     # 按照 opt对象 初始化参数设置
     gaussians.training_setup(opt)
@@ -66,7 +62,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         gaussians.restore(model_params, opt)
     
     # 设置背景颜色，1,1,1,1,0,0,0表示白色背景，0,0,0,0,0,0,0表示黑色背景
-    bg_color = [1, 1, 1, 1, 0, 0, 0] if dataset.white_background else [0, 0, 0, 0, 0, 0, 0]
+    bg_color = [1, 1, 1, 1, 0, 0, 0] if modelset.white_background else [0, 0, 0, 0, 0, 0, 0]
     # 将 bg_color 转换为 PyTorch 的张量，并将其分配到 GPU（device="cuda"）以加速后续的计算。
     # 
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -127,14 +123,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             scene.update_lr(iteration, \
                             freez_train_cam=opt.train_cam_freeze_step, \
                             freez_train_pl=opt.train_pl_freeze_step, \
-                            cam_opt=dataset.cam_opt, \
-                            pl_opt=dataset.pl_opt)
+                            cam_opt=modelset.cam_opt, \
+                            pl_opt=modelset.pl_opt)
             
             
         # Every 1000 its we increase the levels of SH up to a maximum degree
         # 采取神经网络后，不再使用球谐函数，因此不再需要逐级增加球谐函数的阶数
         if iteration % 1000 == 0:
-            if not dataset.use_nerual_phasefunc:
+            if not modelset.use_nerual_phasefunc:
                 gaussians.oneupSHdegree()
         
         # 在早期训练时，冻结 asg 参数，快速收敛
@@ -185,9 +181,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         # only opt with diffuse term at the beginning for a stable training process
         if iteration < opt.spcular_freeze_step + opt.fit_linear_step:   # 只考虑漫反射，不考虑镜面反射，刚开始训练时，先优化漫反射，赋予每个高斯点一个基础颜色
-            render_pkg = render(viewpoint_cam, gaussians, light_stream, calc_stream, local_axises, asg_scales, asg_axises, pipe, bg, fix_labert=True, is_train=prune_visibility, asg_mlp = asg_mlp)
+            render_pkg = render(viewpoint_cam, gaussians, light_stream, calc_stream, local_axises, asg_scales, asg_axises, pipe, bg, fix_labert=True, is_train=prune_visibility, asg_mlp = asg_mlp, iteration = iteration)
         else:    # 开始考虑镜面反射             
-            render_pkg = render(viewpoint_cam, gaussians, light_stream, calc_stream, local_axises, asg_scales, asg_axises, pipe, bg, is_train=prune_visibility)
+            render_pkg = render(viewpoint_cam, gaussians, light_stream, calc_stream, local_axises, asg_scales, asg_axises, pipe, bg, is_train=prune_visibility, asg_mlp = asg_mlp, iteration = iteration)
         
         # 此外，取出各个高斯点云坐标、可见性、半径，用于后续修剪
         viewspace_point_tensor, visibility_filter, radii = render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
@@ -221,7 +217,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         """
         # 初始阶段，固定 Gamma，使数据更接近 sRGB 颜色分布，避免大范围的数值差异带来的过曝，暗部细节丢失
         # 第二阶段逐步调整 Gamma 使其趋近于 1，让网络逐步适应 HDR 线性数据，而不是突然切换，避免网络过早收敛到错误的分布
-        if dataset.hdr:
+        if modelset.hdr:
             if iteration <= opt.spcular_freeze_step:
                 gt_image = torch.pow(gt_image, 1./2.2)
             elif iteration < opt.spcular_freeze_step + opt.fit_linear_step//2:
@@ -255,7 +251,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             # Log and save
             training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), \
-                testing_iterations, scene, render, (pipe, background), gamma=2.2 if dataset.hdr else 1.0)
+                testing_iterations, scene, render, (pipe, background), gamma=2.2 if modelset.hdr else 1.0)
             
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
@@ -362,7 +358,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                             prune_visibility = True
                     
                     # 如果迭代次数是透明度重置迭代次数的倍数，或者在白色背景且迭代次数等于高斯密集化开始迭代次数，则进行透明度重置
-                    if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                    if iteration % opt.opacity_reset_interval == 0 or (modelset.white_background and iteration == opt.densify_from_iter):
                         gaussians.reset_opacity()
 
                 # 已完成高斯密集化阶段，后续不再进行高斯密集化，高斯点不会发生变多的情况，因此 prune_visibility 设置为 False
@@ -418,11 +414,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
             
-            if dataset.asg_mlp and iteration == opt.asg_mlp_freeze: # 40000
+            if modelset.asg_mlp and iteration == opt.asg_mlp_freeze: # 40000
                 asg_mlp = True
             
-            elif dataset.alpha_change and iteration == opt.asg_mlp_freeze:
-                gaussians.start_alpha_asg(gaussians.get_alpha_asg)
+            elif modelset.alpha_change and iteration == opt.asg_change_freeze:
+                gaussians.change_alpha_asg(gaussians.alpha_asg)
                 print("alpha changed")
 
 
@@ -441,7 +437,10 @@ def print_params(gaussians):
     i = 0
     para1 = gaussians.neural_phasefunc.shadow_func.parameters()
     para2 = gaussians.neural_phasefunc.other_effects_func.parameters()
-    para3 = gaussians.neural_phasefunc.asg_func.parameters()
+    if gaussians.neural_phasefunc.asg_mlp:
+        para3 = gaussians.neural_phasefunc.asg_func.parameters()
+    else:
+        para3 = None
     list_params1 = []
     list_params2 = []
     list_params3 = []
@@ -449,27 +448,24 @@ def print_params(gaussians):
         list_params1.append(param)
         i += 1
         if i == 10:
+            print("param1", list_params1)
             break
     for param in para2:
         list_params2.append(param)
         i += 1
         if i == 10:
+            print("param2", list_params2)
             break
-    for param in para3:
-        list_params3.append(param)
-        i += 1
-        if i == 10:
-            break
-    print("param1", list_params1)
-    print("param2", list_params2)
-    print("param3", list_params3)
-
-    for n, m in gaussians.neural_phasefunc.asg_func.named_children():
-        print(f"Layer name: {n}, Type: {type(m)}")  # 打印每个子模块
-    for n, m in gaussians.neural_phasefunc.shadow_func.named_children():
-        print(f"Layer name: {n}, Type: {type(m)}")  # 打印每个子模块
-    for n, m in gaussians.neural_phasefunc.other_effects_func.named_children():
-        print(f"Layer name: {n}, Type: {type(m)}")  # 打印每个子模块
+    if para3 is not None:
+        for param in para3:
+            list_params3.append(param)
+            i += 1
+            if i == 10:
+                print("param3", list_params3)
+                break
+    else:
+        print("param3: no asg_mlp")
+    
 
 
 def prepare_output_and_logger(args):    
@@ -555,7 +551,6 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])     # 存储的迭代次数列表
     parser.add_argument("--start_checkpoint", type=str, default = None)
-    parser.add_argument("--asg_alpha_num", type=int, default=1)
 
     # 令 args 包含 parser 中定义的所有参数的键和值
     args = parser.parse_args(sys.argv[1:])  # argument vector， 第一位是文件名，所以从第二位开始解析

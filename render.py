@@ -55,7 +55,6 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
         # * render_pkg["shadow"]   # 存在一些内存泄漏
         # + render_pkg["other_effects"]
         # gt = view.original_image[0:3, :, :]
-        
         if write_image:
             # 如果图片是 hdr 格式，则 gamma 校正
             # png 格式，是直接在 sRGB 空间 下重建的，因此不需要 gamma 校正
@@ -76,7 +75,7 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
                 torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
             # torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
 
-def render_sets(dataset : ModelParams, 
+def render_sets(modelset : ModelParams, 
                 iteration : int, 
                 pipeline : PipelineParams, 
                 skip_train : bool, 
@@ -85,67 +84,70 @@ def render_sets(dataset : ModelParams,
                 gamma: bool,
                 valid: bool,
                 write_image: bool):
-    dataset.data_device = "cpu"
+    modelset.data_device = "cpu"
 
     if opt_pose:
-        dataset.source_path = os.path.join(dataset.model_path, f'point_cloud/iteration_{iteration}')
+        modelset.source_path = os.path.join(modelset.model_path, f'point_cloud/iteration_{iteration}')
+
 
     with torch.no_grad():
 
         # load Gaussians attributes, establish scene
-        gaussians = GaussianModel(dataset.sh_degree, dataset.use_nerual_phasefunc, basis_asg_num=dataset.basis_asg_num, asg_channel_num=dataset.asg_channel_num, asg_mlp=dataset.asg_mlp)
+        gaussians = GaussianModel(modelset)
         
         # 创建场景实例
         # iteration 为 -1 则加载最新的模型，否则加载指定迭代次数的模型，如果不存在则创建新的模型文件夹，但这里作为渲染，iteration 肯定要的哇
         # valid 渲染验证集，skip_train 不渲染训练集，skip_test 不渲染测试集
-        scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False, valid=valid, skip_train=skip_train, skip_test=skip_test)
+        scene = Scene(modelset, gaussians, load_iteration=iteration, shuffle=False, valid=valid, skip_train=skip_train, skip_test=skip_test)
         
         """
         本项目中: scene 中储存的 model 也就是 ply 文件，只存储了每个高斯的属性，不包括每个高斯的神经网络参数，以及公用的参数
-            因此需要先从 ply 文件中加载高斯模型参数，然后从 _model_path = os.path.join(dataset.model_path, f"chkpnt{iteration}.pth")
+            因此需要先从 ply 文件中加载高斯模型参数，然后从 _model_path = os.path.join(modelset.model_path, f"chkpnt{iteration}.pth")
                 中提取神经网络参数和一些共用的参数（比如 asg 基函数参数）
         这里的 model_path 是 模型文件夹，包括两个子模型，一个是 point_cloud; 一个是 chkpnt (torch.save(gaussians.capture()) 得到的文件)
         point_cloud 中存储了高斯模型参数，chkpnt 中存储了优化器状态以及神经网络参数和一些共用的参数
         """
-        if dataset.use_nerual_phasefunc:
+        if modelset.use_nerual_phasefunc:
             if iteration == -1:
-                iteration = searchForMaxIteration(os.path.join(dataset.model_path, "point_cloud"))
-            _model_path = os.path.join(dataset.model_path, f"chkpnt{iteration}.pth")
+                iteration = searchForMaxIteration(os.path.join(modelset.model_path, "point_cloud"))
+            _model_path = os.path.join(modelset.model_path, f"chkpnt{iteration}.pth")
             if os.path.exists(_model_path):
                 (model_params, first_iter) = torch.load(_model_path)
+                if isinstance(model_params, dict):
+                    model_params = list(model_params.values())
                 # load ASG parameters
-                gaussians.asg_func = Mixture_of_ASG(dataset.basis_asg_num, dataset.asg_channel_num)
-                gaussians.asg_func.asg_sigma = model_params[9]
-                gaussians.asg_func.asg_rotation = model_params[10]
-                gaussians.asg_func.asg_scales = model_params[11]
+                gaussians.asg_func = Mixture_of_ASG(modelset.basis_asg_num, modelset.asg_channel_num)
+                gaussians.asg_func.asg_sigma = model_params[8]
+                gaussians.asg_func.asg_rotation = model_params[9]
+                gaussians.asg_func.asg_scales = model_params[10]
                 # load MLP parameters
-                gaussians.neural_phasefunc = Neural_phase(hidden_feature_size=dataset.phasefunc_hidden_size, \
-                                        hidden_feature_layers=dataset.phasefunc_hidden_layers, \
-                                        frequency=dataset.phasefunc_frequency, \
-                                        neural_material_size=dataset.neural_material_size, \
-                                        asg_mlp = dataset.asg_mlp).to(device="cuda")
-                gaussians.neural_phasefunc.load_state_dict(model_params[15])
+                gaussians.neural_phasefunc = Neural_phase(hidden_feature_size=modelset.phasefunc_hidden_size, \
+                                        hidden_feature_layers=modelset.phasefunc_hidden_layers, \
+                                        frequency=modelset.phasefunc_frequency, \
+                                        neural_material_size=modelset.neural_material_size, \
+                                        asg_mlp = gaussians.asg_mlp).to(device="cuda")
+                gaussians.neural_phasefunc.load_state_dict(model_params[14])
                 gaussians.neural_phasefunc.eval()
             else:
                 raise Exception(f"Could not find : {_model_path}")
 
-        bg_color = [1, 1, 1, 1, 0, 0, 0] if dataset.white_background else [0, 0, 0, 0, 0, 0, 0]
+        bg_color = [1, 1, 1, 1, 0, 0, 0] if modelset.white_background else [0, 0, 0, 0, 0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
         
         if valid:
             print("valid")
-            render_set(dataset.model_path, "valid", scene.loaded_iter, scene.getValidCameras(), 
-                       gaussians, pipeline, background, gamma, write_image=True)
+            render_set(modelset.model_path, "valid", scene.loaded_iter, scene.getValidCameras(), 
+                       gaussians, pipeline, background, gamma, write_image=write_image)
         
         if not skip_train:
             print("train")
-            render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), 
-                       gaussians, pipeline, background, gamma, write_image=True)
+            render_set(modelset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), 
+                       gaussians, pipeline, background, gamma, write_image=write_image)
 
         if not skip_test:
             print("test")
-            render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), 
-                       gaussians, pipeline, background, gamma, write_image=True)
+            render_set(modelset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), 
+                       gaussians, pipeline, background, gamma, write_image=write_image)
             
 if __name__ == "__main__":
     # Set up command line argument parser

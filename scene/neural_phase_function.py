@@ -23,6 +23,7 @@ class Neural_phase(nn.Module):
     def __init__(self, hidden_feature_size=32, hidden_feature_layers=3, frequency=4, neural_material_size=6, asg_mlp=False, mlp_zero=False):
         super().__init__()
         self.neural_material_size = neural_material_size
+        self.asg_mlp = asg_mlp
         
         # 利用 tcnn 创建更高效的 mlp
         # configuration
@@ -66,16 +67,18 @@ class Neural_phase(nn.Module):
         # 输入维度为 高斯点的材质维度/高斯点的可学习隐变量（neural_material_size）+ 光源方向，高斯中心高频特征（encoding.n_output_dims * 2） + 原始阴影维度（1）
         # 输出为 修正阴影值（维度为1）
         self.shadow_func = tcnn.Network(self.neural_material_size + self.encoding.n_output_dims * 2 + 1, 1, shadow_config)
+        # self.shadow_func = tcnn.Network(self.neural_material_size + self.encoding.n_output_dims * 2 + 1, 1, shadow_config)
 
         # 其他效果：
-        # 输入维度为 高斯点的材质维度/高斯点的可学习隐变量（neural_material_size）+ 观察方向、高斯中心高频特征 encoding.n_output_dims * 2）
+        # 输入维度为 高斯点的材质维度/高斯点的可学习隐变量（neural_material_size）+ 观察方向、高斯中心高频特征 (encoding.n_output_dims * 2）
         # 输出为 RGB 分量，RPG components
         self.other_effects_func = tcnn.Network(self.neural_material_size + self.encoding.n_output_dims * 2, 3, other_effects_config)
 
         # 修正高光通道：
         # 输入维度为 高斯点的材质维度/高斯点的可学习隐变量（neural_material_size）+ asg_1 的特征维度
         # 输出为 asg_1 的修正
-        self.asg_func = tcnn.Network(self.neural_material_size + 3, 1, asg_func_config)
+        if self.asg_mlp:
+            self.asg_func = tcnn.Network(self.neural_material_size + 3, 1, asg_func_config)
         
         """
         在 PyTorch 中，named_children() 返回当前模型的所有子模块的名称和对象，名称一般是模块的顺序
@@ -121,16 +124,18 @@ class Neural_phase(nn.Module):
             param.requires_grad = False
         for name, param in self.other_effects_func.named_parameters():
             param.requires_grad = False
-        for name, param in self.asg_func.named_parameters():
-            param.requires_grad = False
+        if self.asg_mlp:
+            for name, param in self.asg_func.named_parameters():
+                param.requires_grad = False
 
     def unfreeze(self):
         for name, param in self.shadow_func.named_parameters():
             param.requires_grad = True
         for name, param in self.other_effects_func.named_parameters():
             param.requires_grad = True
-        for name, param in self.asg_func.named_parameters():
-            param.requires_grad = True
+        if self.asg_mlp:
+            for name, param in self.asg_func.named_parameters():
+                param.requires_grad = True
 
 
     def forward(self, wi, wo, pos, neural_material, hint, asg_1, asg_mlp = False):
@@ -160,7 +165,8 @@ class Neural_phase(nn.Module):
         
         # 当 other_effects 有 NaN 值，会返回包含 True 值的张量，随后在 any() 函数下返回 True，经过 not 变为 False，最终由于 assert False ， 抛出 AssertionError 异常，终止运行。
         assert not torch.isnan(other_effects).any()
-        decay = self.shadow_func(torch.concat([wi_enc, pos_enc, neural_material, hint], dim=-1))
+        decay = self.shadow_func(torch.concat([neural_material, wi_enc, wo_enc, hint], dim=-1))
+        # decay = self.shadow_func(torch.concat([wi_enc, pos_enc, neural_material, hint], dim=-1))
         """
         torch.relu(tensor) 对张量进行逐元素 relu 操作（也就是再次经过 relu 激活函数），大于 0 的值维持原值，小于 0 的值取 0
         """
@@ -173,4 +179,5 @@ class Neural_phase(nn.Module):
         
         # torch.relu(decay - 1e-5) 如果 decay 过小，小于 1e-5，则设置为 0（因为相减后会为负）。
         # 这里应该除了为了减少计算开销，同时因为用的 leaky_relu 最后结果可能为负，所以需要用 relu 修正
+        decay = hint * decay
         return torch.relu(decay - 1e-5), other_effects, asg_3

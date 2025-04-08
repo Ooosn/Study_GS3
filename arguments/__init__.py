@@ -88,6 +88,7 @@ class ModelParams(ParamGroup):
         self.asg_channel_num = 1
         self.asg_mlp = False
         self.alpha_change = False
+        self.asg_alpha_num = 1
         
 
         super().__init__(parser, "Loading Parameters", sentinel)
@@ -180,6 +181,7 @@ class OptimizationParams(ParamGroup):
         """
         self.mlp_zero = False
         self.asg_mlp_freeze = 40000
+        self.asg_change_freeze = 40000
         
         super().__init__(parser, "Optimization Parameters")
 

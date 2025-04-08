@@ -83,7 +83,7 @@ __global__ void checkFrustum(int P, // 高斯点数量
 	const float* projmatrix, // 投影矩阵
 	bool* present) // 是否可见 // 通过指针直接修改数据
 {											  
-	// idx = 网格（Grid/）blockIdx.x * 线程块（Block）blockDim.x+ 线程（Thread）threadIdx.x
+	// idx = 网格（Grid/）blockIdx * 线程块（Block）blockDim + 线程（Thread）threadIdx
 	// 网格代表不同kernel（任务），blockDim 是生产线，idx 是流水线上加工的零件
 	// 因此当运行该核函数时，就相当于启动了一个 kernel，kernel 中有 P 个任务（逻辑线程），每个任务都有一个 idx，它是线程的唯一编号
 	//     他们在不同的生产线（blockDim）上并行运行，所以他们会进入队列，等待 GPU 核心（工人）来处理

@@ -216,8 +216,6 @@ def render(viewpoint_camera,
 
                 }
 
-                
-
                 if gau.use_hgs:
                     shadow, out_weight = DifferentiableShadow.apply(hgs_normals, rasterizer_light, light_inputs)
                 else:

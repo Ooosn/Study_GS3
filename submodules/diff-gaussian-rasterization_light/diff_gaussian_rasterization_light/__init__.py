@@ -44,13 +44,15 @@ class GaussianRasterizer(nn.Module):
         colors_precomp = kwargs.get("colors_precomp", None)
         scales = kwargs.get("scales", None)
         rotations = kwargs.get("rotations", None)
-        cov3D_precomp = kwargs.get("cov3D_precomp", None)
+        cov3Ds_precomp = kwargs.get("cov3Ds_precomp", None)
+        hgs_normals = kwargs.get("hgs_normals", None)
+        hgs_opacities = kwargs.get("hgs_opacities", None)
 
 
         if (shs is None and colors_precomp is None) or (shs is not None and colors_precomp is not None):
             raise Exception('Please provide excatly one of either SHs or precomputed colors!')
         
-        if ((scales is None or rotations is None) and cov3D_precomp is None) or ((scales is not None or rotations is not None) and cov3D_precomp is not None):
+        if ((scales is None or rotations is None) and cov3Ds_precomp is None) or ((scales is not None or rotations is not None) and cov3Ds_precomp is not None):
             raise Exception('Please provide exactly one of either scale/rotation pair or precomputed 3D covariance!')
         
         if shs is None:
@@ -61,9 +63,12 @@ class GaussianRasterizer(nn.Module):
             kwargs["scales"] = torch.Tensor([])
         if rotations is None:
             kwargs["rotations"] = torch.Tensor([])
-        if cov3D_precomp is None:
-            kwargs["cov3D_precomp"] = torch.Tensor([])
-
+        if cov3Ds_precomp is None:
+            kwargs["cov3Ds_precomp"] = torch.Tensor([])
+        if hgs_normals is None:
+            kwargs["hgs_normals"] = torch.Tensor([])
+        if hgs_opacities is None:
+            kwargs["hgs_opacities"] = torch.Tensor([])
 
         # Invoke C++/CUDA rasterization routine
         return rasterize_gaussians(**kwargs)
@@ -156,10 +161,10 @@ class _RasterizeGaussians(torch.autograd.Function):
             # hgs 相关
             hgs,
             hgs_normals,
-            hgs_opacities,
+            hgs_opacities
 
             # 流
-            light_stream
+            # light_stream
         )
 
         # Invoke C++/CUDA rasterizer

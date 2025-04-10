@@ -94,7 +94,7 @@ RasterizeGaussiansCUDA(
 	const float tan_fovy,	// 视图矩阵的 y 方向的切线
     const int image_height,	// 图像高度
     const int image_width,	// 图像宽度
-	const torch::Tensor& sh,	// sh 系数
+	const torch::Tensor& shs,	// sh 系数
 	const int degree,	// sh 阶数
 	const torch::Tensor& campos,	// 相机位置
 	const bool prefiltered,	// 预过滤， 默认 false
@@ -111,10 +111,8 @@ RasterizeGaussiansCUDA(
 	// hgs 相关
 	const bool hgs,
 	const torch::Tensor& hgs_normals,
-	const torch::Tensor& hgs_opacities,
-
-	// 流
-	const torch::Tensor& light_stream)
+	const torch::Tensor& hgs_opacities
+	)
 {
 // 检查 means3D 的维度是否为 2，且第二维的大小是否为 3
   if (means3D.ndimension() != 2 || means3D.size(1) != 3) {
@@ -181,9 +179,9 @@ RasterizeGaussiansCUDA(
 	  // 根据 sh 系数的维度，初始化 M
 	  // sh 维度为 （num_points, num_coefficients）
 	  int M = 0;
-	  if(sh.size(0) != 0)
+	  if(shs.size(0) != 0)
 	  {
-		M = sh.size(1);
+		M = shs.size(1);
       }
 
 
@@ -203,7 +201,7 @@ RasterizeGaussiansCUDA(
 		// 图像高度和宽度
 		W, H,
 		means3D.contiguous().data<float>(),
-		sh.contiguous().data_ptr<float>(),
+		shs.contiguous().data_ptr<float>(),
 		colors.contiguous().data<float>(), 
 		opacities.contiguous().data<float>(), 
 		scales.contiguous().data_ptr<float>(),
@@ -252,7 +250,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
     const torch::Tensor& dL_dout_color,
 	const torch::Tensor& dL_dout_trans,
 	const torch::Tensor& out_trans,
-	const torch::Tensor& sh,
+	const torch::Tensor& shs,
 	const int degree,
 	const torch::Tensor& campos,
 	const torch::Tensor& geomBuffer,
@@ -271,9 +269,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
   const int W = image_width;
   
   int M = 0;
-  if(sh.size(0) != 0)
+  if(shs.size(0) != 0)
   {	
-	M = sh.size(1);
+	M = shs.size(1);
   }
 
 // 初始化 返回的张量，也是我们需要的 梯度
@@ -282,8 +280,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
   torch::Tensor dL_dcolors = torch::zeros({P, NUM_CHANNELS}, means3D.options());
   torch::Tensor dL_dconic = torch::zeros({P, 2, 2}, means3D.options());
   torch::Tensor dL_dopacities = torch::zeros({P, 1}, means3D.options());
-  torch::Tensor dL_dcov3D = torch::zeros({P, 6}, means3D.options());
-  torch::Tensor dL_dsh = torch::zeros({P, M, 3}, means3D.options());
+  torch::Tensor dL_dcov3Ds = torch::zeros({P, 6}, means3D.options());
+  torch::Tensor dL_dshs = torch::zeros({P, M, 3}, means3D.options());
   torch::Tensor dL_dscales = torch::zeros({P, 3}, means3D.options());
   torch::Tensor dL_drotations = torch::zeros({P, 4}, means3D.options());
   
@@ -293,7 +291,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	  background.contiguous().data<float>(),
 	  W, H, 
 	  means3D.contiguous().data<float>(),
-	  sh.contiguous().data<float>(),
+	  shs.contiguous().data<float>(),
 	  colors.contiguous().data<float>(),
 	  scales.data_ptr<float>(),
 	  scale_modifier,
@@ -317,15 +315,15 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	  dL_dopacities.contiguous().data<float>(),
 	  dL_dcolors.contiguous().data<float>(),
 	  dL_dmeans3D.contiguous().data<float>(),
-	  dL_dcov3D.contiguous().data<float>(),
-	  dL_dsh.contiguous().data<float>(),
+	  dL_dcov3Ds.contiguous().data<float>(),
+	  dL_dshs.contiguous().data<float>(),
 	  dL_dscales.contiguous().data<float>(),
 	  dL_drotations.contiguous().data<float>(),
 	  debug,
 	  non_trans.contiguous().data<float>());
   }
 
-  return std::make_tuple(dL_dmeans2D, dL_dcolors, dL_dopacities, dL_dmeans3D, dL_dcov3D, dL_dsh, dL_dscales, dL_drotations);
+  return std::make_tuple(dL_dmeans2D, dL_dcolors, dL_dopacities, dL_dmeans3D, dL_dcov3Ds, dL_dshs, dL_dscales, dL_drotations);
 }
 
 torch::Tensor markVisible(

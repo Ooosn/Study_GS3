@@ -146,8 +146,11 @@ class GaussianModel:
         # debug 专用
         self.global_call_counter = 0
 
-        # mine
+        # hgs
         self.use_hgs = False
+        self._hgs_normals = torch.empty(0)
+        self._hgs_opacities = torch.empty(0)
+        self._small_gaussian = torch.empty(0)
 
     def capture(self):
         return {
@@ -175,7 +178,12 @@ class GaussianModel:
         "asg_mlp": self.asg_mlp,
         "asg_alpha_num": self.asg_alpha_num,
 
-        # 这四个按照这个顺序
+        # hgs
+        "_hgs_normals": self._hgs_normals,
+        "_hgs_opacities": self._hgs_opacities,
+        "_small_gaussian": self._small_gaussian,
+
+        # 优化器 这四个按照这个顺序
         "optimizer": self.optimizer.state_dict(),
         "xyz_gradient_accum": self.xyz_gradient_accum,
         "out_weights_accum": self.out_weights_accum,
@@ -282,6 +290,14 @@ class GaussianModel:
     def get_opacity(self):
         return self.opacity_activation(self._opacity)
     
+    @property
+    def get_hgs_normals(self):
+        return self._hgs_normals
+    
+    @property
+    def get_hgs_opacities(self):
+        return self.opacity_activation(self._hgs_opacities)
+    
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
 
@@ -345,7 +361,11 @@ class GaussianModel:
         如果直接对 opacity 进行优化，因为梯度下降优化是无约束的，它可能会跑出 [0,1]
         inverse_sigmoid 让优化参数可以自由更新，同时保证最终的 opacity 仍然落在 [0,1] 之内，这是一种 “间接控制参数范围” 的方法，解决了神经网络无法直接限制参数范围的问题
         """
-        opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
+        if self.use_hgs:
+            hgs_normals =  0.6*torch.ones((fused_point_cloud.shape[0], 3), dtype=torch.float, device="cuda")
+            hgs_opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 2), dtype=torch.float, device="cuda"))
+        else:
+            opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 
         # 场景参数设置
         # 将高斯坐标、高斯特征、高斯透明度设置为神经网络参数，开启梯度计算
@@ -401,6 +421,14 @@ class GaussianModel:
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
+        if self.use_hgs:
+            self._hgs_normals = nn.Parameter(hgs_normals.requires_grad_(True))
+            self._hgs_opacities = nn.Parameter(hgs_opacities.requires_grad_(True))
+
+    """
+    函数：
+        用于将 asg 的 alpha 参数 由 1维 转换为 3 维
+    """
     def change_alpha_asg(self, alpha_asg):
         alpha_asg_3 = alpha_asg.repeat(1, 1, 3)
         self.alpha_asg = nn.Parameter(alpha_asg_3.requires_grad_(True))
@@ -445,6 +473,7 @@ class GaussianModel:
             {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
             {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
         ]
+
         if self.use_MBRDF:
             l.append({'params': [self.kd], 'lr': training_args.kd_lr, "name": "kd"})
             l.append({'params': [self.ks], 'lr': training_args.ks_lr, "name": "ks"})
@@ -455,6 +484,10 @@ class GaussianModel:
             l.append({'params': [self.local_q], 'lr': training_args.local_q_lr_init, "name": "local_q"})
             l.append({'params': [self.neural_material], 'lr': training_args.neural_phasefunc_lr_init, "name": "neural_material"})
             l.append({'params': self.neural_phasefunc.parameters(), 'lr': training_args.neural_phasefunc_lr_init, "name": "neural_phasefunc"})
+        
+        if self.use_hgs:
+            l.append({'params': [self._hgs_normals], 'lr': 0.003, "name": "hgs_normals"})
+            l.append({'params': [self._hgs_opacities], 'lr': 0.003, "name": "hgs_opacities"})
 
         # 利用 Adam 优化器优化参数组 l
         # 不同参数学习率不同，并且有些参数可能未设置学习率，因此 lr 设置为0，在 update_learning_rate 中更新
@@ -529,6 +562,12 @@ class GaussianModel:
                 l.append('local_q_{}'.format(i))
             for i in range(self.neural_material.shape[1]):
                 l.append('neural_material_{}'.format(i))
+            
+        if self.use_hgs:
+            for i in range(self._hgs_normals.shape[1]):
+                l.append('hgs_normals_{}'.format(i))
+            for i in range(self._hgs_opacities.shape[1]):
+                l.append('hgs_opacities_{}'.format(i))
 
         return l
 
@@ -568,6 +607,10 @@ class GaussianModel:
             alpha_asg = self.alpha_asg.detach().cpu().numpy()
             local_q = self.local_q.detach().cpu().numpy()
             neural_material = self.neural_material.detach().cpu().numpy()
+        
+        if self.use_hgs:
+            hgs_normals = self._hgs_normals.detach().cpu().numpy()
+            hgs_opacities = self._hgs_opacities.detach().cpu().numpy()
 
         # dtype_full 生成了一个 NumPy 结构化数据类型 (dtype)，其中每个字段都是 float32 ('f4')
         dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
@@ -589,6 +632,10 @@ class GaussianModel:
                                             kd, ks, alpha_asg[:, :, 0], alpha_asg[:, :, 1], alpha_asg[:, :, 2], local_q, neural_material), axis=1)
         else:
             attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
+        
+        if self.use_hgs:
+            attributes = np.concatenate((attributes, \
+                                        hgs_normals, hgs_opacities), axis=1)
 
         # 创建 ply 数据:
         # map(tuple, attributes) 返回一个迭代器，它会 逐行 把 attributes 的数据转换为 tuple 。
@@ -606,6 +653,102 @@ class GaussianModel:
 
     # 将不透明度过大的点重置透明度为回归近乎透明，重新训练，避免某些部分效果不好但梯度消失。
     # 当不透明度 小于 0.005 时，会删除这些点，因此我们只用 设置 0.01 作为阈值
+
+    # torch 实现切面协方差计算
+    def generate_small_cov(self, cov_input, n):
+        # Convert input tensors to float64
+        cov_input = cov_input.to(torch.float64)
+        n = n.to(torch.float64)
+
+        num = cov_input.shape[0]
+
+        n_norm = torch.norm(n, dim=1, keepdim=True)
+        n = n / n_norm
+
+        device = n.device
+
+        # cov_input to matrix
+        cov = torch.zeros((num, 3, 3), dtype=torch.float64).to(device)
+        cov[:, 0, 0] = cov_input[:, 0]
+        cov[:, 0, 1] = cov[:, 1, 0] = cov_input[:, 1]
+        cov[:, 0, 2] = cov[:, 2, 0] = cov_input[:, 2]
+        cov[:, 1, 1] = cov_input[:, 3]
+        cov[:, 1, 2] = cov[:, 2, 1] = cov_input[:, 4]
+        cov[:, 2, 2] = cov_input[:, 5]
+
+        # normalize normal
+        # v1 and v2
+        v1 = torch.zeros((num, 3), dtype=torch.float64).to(device)
+        v2 = torch.zeros((num, 3), dtype=torch.float64).to(device)
+
+        zero_indices = (n[:, 0] == 0) & (n[:, 1] == 0)
+
+        v1[zero_indices] = torch.tensor([1, 0, 0], dtype=torch.float64).to(device)
+        v2[zero_indices] = torch.tensor([0, 1, 0], dtype=torch.float64).to(device)
+        # n[zero_indices] = n[zero_indices] / n[zero_indices][:, 2].unsqueeze(1)
+
+        v1[~zero_indices] = torch.stack(
+            [n[~zero_indices][:, 1], -n[~zero_indices][:, 0], torch.zeros_like(n[~zero_indices][:, 0]).to(device)],
+            dim=1)
+        v1[~zero_indices] = v1[~zero_indices] / torch.norm(v1[~zero_indices], dim=1, keepdim=True)
+        v2[~zero_indices] = torch.cross(n[~zero_indices], v1[~zero_indices])
+        v2[~zero_indices] = v2[~zero_indices] / torch.norm(v2[~zero_indices], dim=1, keepdim=True)
+
+        # construct basis
+        R_transform = torch.stack([v1, v2, n], dim=2)  # (num, 3, 3)
+        basis = R_transform.transpose(1, 2)  # (num, 3, 3)
+
+        # cov_inv2
+        cov_transformed = torch.matmul(basis, torch.matmul(cov, R_transform))
+        cov_inv2 = torch.linalg.inv(cov_transformed)
+
+        # 2D covariance matrix for cutting surface
+        twoD_mat = cov_inv2[:, :2, :2]
+
+        eig_value, eig_vector = torch.linalg.eig(twoD_mat)
+        #####each eig_value need to be sort from large to small, and also use the same order for eig_vector
+        eig_value = eig_value.real
+        eig_vector = eig_vector.real
+        eig_value_sorted, indices = torch.sort(eig_value, descending=False)
+        eig_vector_sorted = torch.gather(eig_vector, 2, indices.unsqueeze(1).expand(-1, eig_vector.size(1), -1))
+
+        lambda1 = eig_value_sorted[:, 0]
+        lambda2 = eig_value_sorted[:, 1]
+
+        v1_2d = eig_vector_sorted[:, :, 0]
+        v2_2d = eig_vector_sorted[:, :, 1]
+
+        #####
+        v1_2d = torch.stack([v1_2d[:, 0], v1_2d[:, 1], torch.zeros_like(v1_2d[:, 0])], dim=1)
+        v2_2d = torch.stack([v2_2d[:, 0], v2_2d[:, 1], torch.zeros_like(v2_2d[:, 0])], dim=1)
+
+        v3_2d = torch.tensor([0, 0, 1], dtype=torch.float64).expand(num, -1).to(device)
+
+        v_3d = torch.stack([v1_2d, v2_2d, v3_2d], dim=2)  # (num, 3, 3)
+
+        lam_mat = torch.zeros((num, 3, 3), dtype=torch.float64).to(device)
+
+        lam_mat[:, 0, 0] = 1 / lambda1
+        lam_mat[:, 1, 1] = 1 / lambda2
+        lam_mat[:, 2, 2] = 0.001 / torch.max(lambda1, lambda2)
+
+        # cov_new_3d = torch.linalg.inv(torch.matmul(v_3d.transpose(1, 2), torch.matmul(lam_mat, v_3d)))
+        cov_new_3d = torch.matmul(v_3d, torch.matmul(lam_mat, v_3d.transpose(1, 2)))
+        # back to the world coordinate
+        cov_new_3d = torch.matmul(R_transform, torch.matmul(cov_new_3d, basis))
+
+        # transform to six elements each
+        cov_six_elements = torch.zeros((cov_new_3d.shape[0], 6), dtype=torch.float64, device=cov_new_3d.device)
+        cov_six_elements[:, 0] = cov_new_3d[:, 0, 0]
+        cov_six_elements[:, 1] = cov_new_3d[:, 0, 1]
+        cov_six_elements[:, 2] = cov_new_3d[:, 0, 2]
+        cov_six_elements[:, 3] = cov_new_3d[:, 1, 1]
+        cov_six_elements[:, 4] = cov_new_3d[:, 1, 2]
+        cov_six_elements[:, 5] = cov_new_3d[:, 2, 2]
+
+        return cov_six_elements.float()
+    
+
     def reset_opacity(self):
         opacities_new = inverse_sigmoid(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
@@ -669,8 +812,10 @@ class GaussianModel:
                 asg_alpha_num = 3
             else:
                 asg_alpha_num = self.asg_alpha_num
-            assert len(alpha_asg_names) == self.basis_asg_num * asg_alpha_num, f"alpha_asg_names 数量与 basis_asg_num 和 asg_alpha_num 不匹配: {len(alpha_asg_names)} != {self.basis_asg_num} * {asg_alpha_num}"
-            
+            assert len(alpha_asg_names) == self.basis_asg_num * asg_alpha_num,  (
+                    f"alpha_asg_names 数量与 basis_asg_num 和 asg_alpha_num 不匹配: "
+                    f"{len(alpha_asg_names)} != {self.basis_asg_num} * {asg_alpha_num}"
+                )
             alpha_asg = np.zeros((xyz.shape[0], self.basis_asg_num, asg_alpha_num))
             for attr_name in alpha_asg_names:
                 basis, channel = map(int, attr_name.split('_')[-2:])  # 解析通道索引 j 和 Basis 索引 i
@@ -701,6 +846,18 @@ class GaussianModel:
         for idx, attr_name in enumerate(rot_names):
             rots[:, idx] = np.asarray(plydata.elements[0][attr_name])
 
+        if self.use_hgs:
+            hgs_normals_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("hgs_normals_")]
+            hgs_normals_names = sorted(hgs_normals_names, key = lambda x: int(x.split('_')[-1]))
+            hgs_opacities_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("hgs_opacities_")]
+            hgs_opacities_names = sorted(hgs_opacities_names, key = lambda x: int(x.split('_')[-1]))
+            hgs_normalss = np.zeros((xyz.shape[0], len(hgs_normals_names)))
+            hgs_opacities = np.zeros((xyz.shape[0], len(hgs_opacities_names)))
+            for idx, attr_name in enumerate(hgs_normals_names):
+                hgs_normalss[:, idx] = np.asarray(plydata.elements[0][attr_name])    # [N, 3]
+            for idx, attr_name in enumerate(hgs_opacities_names):
+                hgs_opacities[:, idx] = np.asarray(plydata.elements[0][attr_name])    # [N, 2]
+
         self._xyz = nn.Parameter(torch.tensor(xyz, dtype=torch.float, device="cuda").requires_grad_(True))
         self._features_dc = nn.Parameter(torch.tensor(features_dc, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
         self._features_rest = nn.Parameter(torch.tensor(features_extra, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
@@ -714,11 +871,19 @@ class GaussianModel:
         self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
 
+        if self.use_hgs:
+            self._hgs_normals = nn.Parameter(torch.tensor(hgs_normalss, dtype=torch.float, device="cuda").requires_grad_(True))
+            self._hgs_opacities = nn.Parameter(torch.tensor(hgs_opacities, dtype=torch.float, device="cuda").requires_grad_(True))
+            # torch 实现，暂时没有用到，作为占位罢了
+            self.small_gaussian = self.generate_small_cov(self.get_covariance(), self._hgs_normals)
+
+
         # 建立 Gaussian 实例时决定，所以如果是中途保存的 ply，max_sh_degree 可能还需要额外记忆，其实应该也保存的，但这里没有考虑，可能训练比较快吧
         # 或者是 直接默认已启动最高阶的 SH 基函数，但是我就怕这个暂时还没保存，也许这个ply文件一定是训练后才保存的
         # 如果是训练后才保存的，就说的通了，因为渲染阶段，还需要 active_sh_degree 来选择需要的常数进行计算
         self.active_sh_degree = self.max_sh_degree
 
+        
     """
     函数: 因为有时会改动一些 训练过程中的参数，因此需要重新 nn.Parameter 对象 并更新优化器使数据对齐
     返回: optimizable_tensors (dict): 更新后的参数字典，键为参数名称，值为新的 nn.Parameter
@@ -812,6 +977,11 @@ class GaussianModel:
             self.alpha_asg = optimizable_tensors["alpha_asg"]
             self.local_q = optimizable_tensors["local_q"]
             self.neural_material = optimizable_tensors["neural_material"]
+        
+        if self.use_hgs:
+            self._hgs_normals = optimizable_tensors["hgs_normals"]
+            self._hgs_opacities = optimizable_tensors["hgs_opacities"]
+        
 
         # 更新2D梯度累加器以及权重累加器
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
@@ -870,7 +1040,9 @@ class GaussianModel:
          利用上一个函数，将新生成的点和之前的高斯点拼接，并更新优化器中的参数
     返回：无返回，直接更新 self 中的属性
     """
-    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_kd, new_ks, new_alpha_asg, local_q, new_neural_material):
+    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation,  # 通用
+                              new_kd, new_ks, new_alpha_asg, local_q, new_neural_material,  # asg
+                              new_hgs_normals, new_hgs_opacities):  # hgs
         
         d = {"xyz": new_xyz,
         "f_dc": new_features_dc,
@@ -886,11 +1058,20 @@ class GaussianModel:
                 "local_q": local_q,
                 "neural_material": new_neural_material
             })
-        # 新生成的高斯点和之前的高斯点拼接，直接更新参数和优化器
+        if self.use_hgs:
+            d.update({
+                "hgs_normals": new_hgs_normals,
+                "hgs_opacities": new_hgs_opacities
+            })
+
+
+        # 新生成的高斯点和之前的高斯点拼接，直接更新参数和优化器：
+        
+        # 1. 拼接高斯点，重新构建可学习神经参数，并更新优化器
         # cat_tensors_to_optimizer(d) 函数拼接原高斯点和新添加的 d 高斯点，并且同时更新优化器状态，并且返回 optimizable_tensors 所有拼接后的 非通用asg 高斯点参数属性
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
 
-
+        # 2. 更新 gaussian 参数
         # 利用返回的 optimizable_tensors 更新类内部的属性
         self._xyz = optimizable_tensors["xyz"]
         self._features_dc = optimizable_tensors["f_dc"]
@@ -904,6 +1085,9 @@ class GaussianModel:
             self.alpha_asg = optimizable_tensors["alpha_asg"]
             self.local_q = optimizable_tensors["local_q"]
             self.neural_material = optimizable_tensors["neural_material"]
+        if self.use_hgs:
+            self._hgs_normals = optimizable_tensors["hgs_normals"]
+            self._hgs_opacities = optimizable_tensors["hgs_opacities"]
 
         # 重置2D梯度累加器以及权重累加器，用于对齐后续的计算，之前的计算已经用过修剪和密集化了，所以需要重置
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
@@ -997,13 +1181,21 @@ class GaussianModel:
         new_neural_material = None if not self.use_MBRDF else self.get_neural_material[selected_pts_mask].repeat(N,1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
 
-        # 更新高斯状态，为了模块化，分为了两步，第一步就是直接拼接模块，不考虑其他删减，第二是，在通过删减模块修正场景中的高斯点
-        # 1）将新生成的高斯点与原高斯点拼接，并更新模型参数和优化器状态
-        # 此时尚未删除被分裂的点，因此还有后续一个处理
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, \
-            new_kd, new_ks, new_alpha_asg, new_local_q, new_neural_material)
+        
+        new_hgs_normals = None if not self.use_hgs else self._hgs_normals[selected_pts_mask].repeat(N,1)
+        new_hgs_opacities = None if not self.use_hgs else self._hgs_opacities[selected_pts_mask].repeat(N,1)
 
-        # 2）删除分裂前的点，更新真正的参数和优化器状态
+        # 更新高斯状态，为了模块化，分为了两步，第一步就是直接拼接模块，不考虑其他删减，第二是，在通过删减模块修正场景中的高斯点
+        # 1）densification_postfix 先将分裂后生成的高斯点与原高斯点拼接，并更新模型参数和优化器状态
+        # 此时尚未删除被分裂的点，因此还有后续一个处理
+        """
+        你可能会觉得 densification_postfix函数多余处理优化器状态，其实这个函数 clone 也用，所以为了简单，就写在一起了。
+        """
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, \
+            new_kd, new_ks, new_alpha_asg, new_local_q, new_neural_material,
+            new_hgs_normals, new_hgs_opacities)
+
+        # 2）prune_points 删除分裂前的点，并更新参数和优化器状态
         # 参数和优化器已经添加了新生成的点，所以需要再删除分裂前的点的时候，要通过拼接 N * selected_pts_mask.sum() 来对齐维度。
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
@@ -1036,9 +1228,17 @@ class GaussianModel:
         new_local_q = None if not self.use_MBRDF else self.local_q[selected_pts_mask]
         new_neural_material = None if not self.use_MBRDF else self.get_neural_material[selected_pts_mask]
 
+        #new_opacities = inverse_sigmoid(
+        #    1 - torch.sqrt(1 - torch.sigmoid(new_opacities)))  # self._opacity[selected_pts_mask])
+        #self._opacity[selected_pts_mask].copy_(new_opacities.detach())
+        new_hgs_normals = None if not self.use_hgs else self._hgs_normals[selected_pts_mask]
+        new_hgs_opacities = None if not self.use_hgs else self._hgs_opacities[selected_pts_mask]
+    
+    
         # 将新生成的高斯点与原高斯点拼接，并更新模型参数和优化器状态（分裂中是先添加两组分裂点，然后删去原点，这里直接添加一组相同属性的点作为复制）
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, \
-            new_kd, new_ks, new_alpha_asg, new_local_q, new_neural_material)
+            new_kd, new_ks, new_alpha_asg, new_local_q, new_neural_material,\
+            new_hgs_normals, new_hgs_opacities)
 
     """
     函数：真正的密集化函数与修剪函数

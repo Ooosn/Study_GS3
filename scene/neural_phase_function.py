@@ -165,7 +165,7 @@ class Neural_phase(nn.Module):
         
         # 当 other_effects 有 NaN 值，会返回包含 True 值的张量，随后在 any() 函数下返回 True，经过 not 变为 False，最终由于 assert False ， 抛出 AssertionError 异常，终止运行。
         assert not torch.isnan(other_effects).any()
-        decay = self.shadow_func(torch.concat([neural_material, wi_enc, wo_enc, hint], dim=-1))
+        decay = self.shadow_func(torch.concat([wi_enc, pos_enc, neural_material, hint], dim=-1))
         # decay = self.shadow_func(torch.concat([wi_enc, pos_enc, neural_material, hint], dim=-1))
         """
         torch.relu(tensor) 对张量进行逐元素 relu 操作（也就是再次经过 relu 激活函数），大于 0 的值维持原值，小于 0 的值取 0

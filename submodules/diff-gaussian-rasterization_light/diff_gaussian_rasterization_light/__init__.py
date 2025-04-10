@@ -18,36 +18,78 @@ def cpu_deep_copy_tuple(input_tuple):
     copied_tensors = [item.cpu().clone() if isinstance(item, torch.Tensor) else item for item in input_tuple]
     return tuple(copied_tensors)
 
-def rasterize_gaussians(
-    means3D,
-    means2D,
-    sh,
-    colors_precomp,
-    opacities,
-    scales,
-    rotations,
-    cov3Ds_precomp,
-    raster_settings,
-    non_trans,
-    offset,
-    thres,
-    is_train,
-):
-    return _RasterizeGaussians.apply(
-        means3D,
-        means2D,
-        sh,
-        colors_precomp,
-        opacities,
-        scales,
-        rotations,
-        cov3Ds_precomp,
-        raster_settings,
-        non_trans,
-        offset,
-        thres,
-        is_train,
-    )
+class GaussianRasterizer(nn.Module):
+    def __init__(self, raster_settings):
+        super().__init__()
+        self.raster_settings = raster_settings
+
+    def markVisible(self, positions):
+        # Mark visible points (based on frustum culling for camera) with a boolean 
+        with torch.no_grad():
+            raster_settings = self.raster_settings
+            visible = _C.mark_visible(
+                positions,
+                raster_settings.viewmatrix,
+                raster_settings.projmatrix)
+            
+        return visible
+
+    def forward(self, **kwargs):
+        
+        raster_settings = self.raster_settings
+        kwargs["raster_settings"] = raster_settings
+
+
+        shs = kwargs.get("shs", None)
+        colors_precomp = kwargs.get("colors_precomp", None)
+        scales = kwargs.get("scales", None)
+        rotations = kwargs.get("rotations", None)
+        cov3D_precomp = kwargs.get("cov3D_precomp", None)
+
+
+        if (shs is None and colors_precomp is None) or (shs is not None and colors_precomp is not None):
+            raise Exception('Please provide excatly one of either SHs or precomputed colors!')
+        
+        if ((scales is None or rotations is None) and cov3D_precomp is None) or ((scales is not None or rotations is not None) and cov3D_precomp is not None):
+            raise Exception('Please provide exactly one of either scale/rotation pair or precomputed 3D covariance!')
+        
+        if shs is None:
+            kwargs["shs"] = torch.Tensor([])
+        if colors_precomp is None:
+            kwargs["colors_precomp"] = torch.Tensor([])
+        if scales is None:
+            kwargs["scales"] = torch.Tensor([])
+        if rotations is None:
+            kwargs["rotations"] = torch.Tensor([])
+        if cov3D_precomp is None:
+            kwargs["cov3D_precomp"] = torch.Tensor([])
+
+
+        # Invoke C++/CUDA rasterization routine
+        return rasterize_gaussians(**kwargs)
+
+def rasterize_gaussians(**kwargs):
+    # apply 不支持 关键字参数，因此需要手动指定参数顺序
+    # 顺便调整参数顺序，方便调试
+    param_order = [
+        # 高斯点相关
+        "means3D", "means2D", "shs", "colors_precomp", "opacities",
+        "scales", "rotations", "cov3Ds_precomp", "raster_settings",
+
+        # 阴影相关
+        "non_trans", "offset", "thres", 
+        
+        # prune 相关
+        "is_train",
+
+        # hgs 相关
+        "hgs", "hgs_normals", "hgs_opacities",
+
+        # 流
+        "light_stream"
+    ]
+    args = [kwargs[k] for k in param_order]
+    return _RasterizeGaussians.apply(*args)
 
 class _RasterizeGaussians(torch.autograd.Function):
     @staticmethod
@@ -55,21 +97,34 @@ class _RasterizeGaussians(torch.autograd.Function):
         ctx,
         means3D,
         means2D,
-        sh,
+        shs,
         colors_precomp,
         opacities,
         scales,
         rotations,
         cov3Ds_precomp,
         raster_settings,
+
+        # 阴影相关
         non_trans,
         offset,
         thres,
+
+        # prune 相关
         is_train,
+
+        # hgs 相关
+        hgs,
+        hgs_normals,
+        hgs_opacities,
+
+        # 流
+        light_stream
     ):
         
         # Restructure arguments the way that the C++ lib expects them
         args = (
+            # 高斯点/场景相关
             raster_settings.bg, 
             means3D,
             colors_precomp,
@@ -84,7 +139,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             raster_settings.tanfovy,
             raster_settings.image_height,
             raster_settings.image_width,
-            sh,
+            shs,
             raster_settings.sh_degree,
             # 相机位置，在向光源泼溅中，则为光源位置
             raster_settings.campos,
@@ -97,6 +152,14 @@ class _RasterizeGaussians(torch.autograd.Function):
             thres,
             # is_train = prune_visibility: 
             is_train,
+
+            # hgs 相关
+            hgs,
+            hgs_normals,
+            hgs_opacities,
+
+            # 流
+            light_stream
         )
 
         # Invoke C++/CUDA rasterizer
@@ -119,20 +182,26 @@ class _RasterizeGaussians(torch.autograd.Function):
         ctx.trans=trans
 
         """
-        计算图传播独立于梯度值存在
-        也就是虽然我们在 autograd 中，如果我们不使用 ctx.save_for_backward() ，而是直接赋值，
-            - 那么这些中间变量依然作为计算图一部分被记录，使被引用变量 引用次数 增加，从而本该被释放的变量 不会被释放
-        所以使用 ctx.save_for_backward() 保存中间变量，torch 会自动释放中间变量，相当于 detach
+        在 autograd.Function.forward 中，使用 PyTorch 的操作（如 +, *, sin 等）仍然会构建计算图。
+        如果你保留了某个 Tensor（没有 .detach()），它就会成为计算图的一部分，占用显存和内存。
+
+        ctx.save_for_backward(...) 的作用：
+            - 会自动对传入 Tensor 调用 .detach()，只保存数值副本，不保计算图。
+            - 保存的中间变量可以在 backward 中安全使用。
+            - 可以防止中间变量继续参与 autograd 图，从而节省显存、避免循环引用。
+
+        如果你不使用 save_for_backward 而直接保留中间变量（比如 ctx.foo = some_tensor），
+        那么计算图可能会一直保留在这些变量里，造成内存无法释放。
         """
         # 相当于使用 .detach() ，只保存 tensor 的值，不会存储梯度，计算图等
-        ctx.save_for_backward(colors_precomp, means3D, scales, rotations, cov3Ds_precomp, radii, sh, geomBuffer, binningBuffer, imgBuffer)
+        ctx.save_for_backward(colors_precomp, means3D, scales, rotations, cov3Ds_precomp, radii, shs, geomBuffer, binningBuffer, imgBuffer)
         
         # 返回 渲染结果，torch 会将他们作为计算图中的下一个节点
         # 这些梯度 会按照顺序 传入 backward 方法
         return color, out_weight, radii, trans
 
     @staticmethod
-    def backward(ctx, grad_out_color, _, grad_out_trans):
+    def backward(ctx, grad_out_color, _, __, grad_out_trans):
 
         # Restore necessary values from context
         num_rendered = ctx.num_rendered
@@ -191,7 +260,21 @@ class _RasterizeGaussians(torch.autograd.Function):
             grad_rotations,
             grad_cov3Ds_precomp,
             None,
+
+            # 阴影相关
             None,
+            None,
+            None,
+
+            # prune 相关
+            None,
+
+            # hgs 相关
+            None,
+            None,
+            None,
+
+            # 流
             None
         )
 
@@ -211,58 +294,5 @@ class GaussianRasterizationSettings(NamedTuple):
     prefiltered : bool
     debug : bool
 
-class GaussianRasterizer(nn.Module):
-    def __init__(self, raster_settings):
-        super().__init__()
-        self.raster_settings = raster_settings
 
-    def markVisible(self, positions):
-        # Mark visible points (based on frustum culling for camera) with a boolean 
-        with torch.no_grad():
-            raster_settings = self.raster_settings
-            visible = _C.mark_visible(
-                positions,
-                raster_settings.viewmatrix,
-                raster_settings.projmatrix)
-            
-        return visible
-
-    def forward(self, means3D, means2D, opacities, shs = None, colors_precomp = None, scales = None, rotations = None, cov3D_precomp = None, non_trans = None, offset=0.015, thres=4.0, is_train=False):
-        
-        raster_settings = self.raster_settings
-
-        if (shs is None and colors_precomp is None) or (shs is not None and colors_precomp is not None):
-            raise Exception('Please provide excatly one of either SHs or precomputed colors!')
-        
-        if ((scales is None or rotations is None) and cov3D_precomp is None) or ((scales is not None or rotations is not None) and cov3D_precomp is not None):
-            raise Exception('Please provide exactly one of either scale/rotation pair or precomputed 3D covariance!')
-        
-        if shs is None:
-            shs = torch.Tensor([])
-        if colors_precomp is None:
-            colors_precomp = torch.Tensor([])
-
-        if scales is None:
-            scales = torch.Tensor([])
-        if rotations is None:
-            rotations = torch.Tensor([])
-        if cov3D_precomp is None:
-            cov3D_precomp = torch.Tensor([])
-
-        # Invoke C++/CUDA rasterization routine
-        return rasterize_gaussians(
-            means3D,
-            means2D,
-            shs,
-            colors_precomp,
-            opacities,
-            scales, 
-            rotations,
-            cov3D_precomp,
-            raster_settings, 
-            non_trans,
-            offset,
-            thres,
-            is_train
-        )
 

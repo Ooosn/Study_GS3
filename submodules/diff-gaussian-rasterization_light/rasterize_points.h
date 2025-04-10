@@ -17,14 +17,15 @@
 	
 std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 RasterizeGaussiansCUDA(
+	// 高斯点/场景相关
 	const torch::Tensor& background,
 	const torch::Tensor& means3D,
     const torch::Tensor& colors,
-    const torch::Tensor& opacity,
+    const torch::Tensor& opacities,
 	const torch::Tensor& scales,
 	const torch::Tensor& rotations,
 	const float scale_modifier,
-	const torch::Tensor& cov3D_precomp,
+	const torch::Tensor& cov3Ds_precomp,
 	const torch::Tensor& viewmatrix,
 	const torch::Tensor& projmatrix,
 	const float tan_fovx, 
@@ -36,10 +37,18 @@ RasterizeGaussiansCUDA(
 	const torch::Tensor& campos,
 	const bool prefiltered,
 	const bool debug,
+	// 阴影相关
 	const torch::Tensor& non_trans,
 	const float offset,
 	const float thres,
-	const bool is_train);
+	// prune 相关
+	const bool is_train,
+	// hgs 相关
+	const bool hgs,
+	const torch::Tensor& hgs_normals,
+	const torch::Tensor& hgs_opacities,
+	// 流
+	const torch::Tensor& light_stream);
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
  RasterizeGaussiansBackwardCUDA(
@@ -50,7 +59,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	const torch::Tensor& scales,
 	const torch::Tensor& rotations,
 	const float scale_modifier,
-	const torch::Tensor& cov3D_precomp,
+	const torch::Tensor& cov3Ds_precomp,
 	const torch::Tensor& viewmatrix,
     const torch::Tensor& projmatrix,
 	const float tan_fovx, 

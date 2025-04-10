@@ -83,11 +83,11 @@ RasterizeGaussiansCUDA(
 	const torch::Tensor& background,// 背景颜色
 	const torch::Tensor& means3D,	// 3D 坐标
     const torch::Tensor& colors,	// 颜色
-    const torch::Tensor& opacity,	// 透明度
+    const torch::Tensor& opacities,	// 透明度
 	const torch::Tensor& scales,	// 缩放
 	const torch::Tensor& rotations,	// 旋转
 	const float scale_modifier,	// 缩放比例
-	const torch::Tensor& cov3D_precomp,	// 协方差矩阵
+	const torch::Tensor& cov3Ds_precomp,	// 协方差矩阵
 	const torch::Tensor& viewmatrix,	// 视图矩阵
 	const torch::Tensor& projmatrix,	// 投影矩阵
 	const float tan_fovx, 	// 视图矩阵的 x 方向的切线
@@ -99,10 +99,22 @@ RasterizeGaussiansCUDA(
 	const torch::Tensor& campos,	// 相机位置
 	const bool prefiltered,	// 预过滤， 默认 false
 	const bool debug,	// 调试， 默认 false
+
+	// 阴影相关
 	const torch::Tensor& non_trans,	// 非透明
-	const float offset,	// 偏移
-	const float thres,	// 阈值
-	const bool is_train)	// prune_visibility
+	const float offset,	// 偏移点深度
+	const float thres,	// 高斯阈值
+
+	// prune 相关
+	const bool is_train,
+
+	// hgs 相关
+	const bool hgs,
+	const torch::Tensor& hgs_normals,
+	const torch::Tensor& hgs_opacities,
+
+	// 流
+	const torch::Tensor& light_stream)
 {
 // 检查 means3D 的维度是否为 2，且第二维的大小是否为 3
   if (means3D.ndimension() != 2 || means3D.size(1) != 3) {
@@ -193,11 +205,11 @@ RasterizeGaussiansCUDA(
 		means3D.contiguous().data<float>(),
 		sh.contiguous().data_ptr<float>(),
 		colors.contiguous().data<float>(), 
-		opacity.contiguous().data<float>(), 
+		opacities.contiguous().data<float>(), 
 		scales.contiguous().data_ptr<float>(),
 		scale_modifier,
 		rotations.contiguous().data_ptr<float>(),
-		cov3D_precomp.contiguous().data<float>(), 
+		cov3Ds_precomp.contiguous().data<float>(), 
 		viewmatrix.contiguous().data<float>(), 
 		projmatrix.contiguous().data<float>(),
 		campos.contiguous().data<float>(),
@@ -232,7 +244,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	const torch::Tensor& scales,
 	const torch::Tensor& rotations,
 	const float scale_modifier,
-	const torch::Tensor& cov3D_precomp,
+	const torch::Tensor& cov3Ds_precomp,
 	const torch::Tensor& viewmatrix,
     const torch::Tensor& projmatrix,
 	const float tan_fovx,
@@ -269,7 +281,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
   torch::Tensor dL_dmeans2D = torch::zeros({P, 3}, means3D.options());
   torch::Tensor dL_dcolors = torch::zeros({P, NUM_CHANNELS}, means3D.options());
   torch::Tensor dL_dconic = torch::zeros({P, 2, 2}, means3D.options());
-  torch::Tensor dL_dopacity = torch::zeros({P, 1}, means3D.options());
+  torch::Tensor dL_dopacities = torch::zeros({P, 1}, means3D.options());
   torch::Tensor dL_dcov3D = torch::zeros({P, 6}, means3D.options());
   torch::Tensor dL_dsh = torch::zeros({P, M, 3}, means3D.options());
   torch::Tensor dL_dscales = torch::zeros({P, 3}, means3D.options());
@@ -286,7 +298,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	  scales.data_ptr<float>(),
 	  scale_modifier,
 	  rotations.data_ptr<float>(),
-	  cov3D_precomp.contiguous().data<float>(),
+	  cov3Ds_precomp.contiguous().data<float>(),
 	  viewmatrix.contiguous().data<float>(),
 	  projmatrix.contiguous().data<float>(),
 	  campos.contiguous().data<float>(),
@@ -302,7 +314,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	  out_trans.contiguous().data<float>(),
 	  dL_dmeans2D.contiguous().data<float>(),
 	  dL_dconic.contiguous().data<float>(),  
-	  dL_dopacity.contiguous().data<float>(),
+	  dL_dopacities.contiguous().data<float>(),
 	  dL_dcolors.contiguous().data<float>(),
 	  dL_dmeans3D.contiguous().data<float>(),
 	  dL_dcov3D.contiguous().data<float>(),
@@ -313,7 +325,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	  non_trans.contiguous().data<float>());
   }
 
-  return std::make_tuple(dL_dmeans2D, dL_dcolors, dL_dopacity, dL_dmeans3D, dL_dcov3D, dL_dsh, dL_dscales, dL_drotations);
+  return std::make_tuple(dL_dmeans2D, dL_dcolors, dL_dopacities, dL_dmeans3D, dL_dcov3D, dL_dsh, dL_dscales, dL_drotations);
 }
 
 torch::Tensor markVisible(

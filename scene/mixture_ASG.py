@@ -54,7 +54,7 @@ class Mixture_of_ASG(nn.Module):
         
         # 初始化 各 asg 的旋转方向
         # 依然采用 四元数
-        asg_rotation = torch.zeros((self.basis_asg_num, 4), dtype=torch.float, device="cuda")
+        asg_rotation = torch.zeros((self.basis_asg_num, 4), dtype=torch.float, device="cuda")   # (basis_asg_num, 4)
         # 各 asg 初始化为 [1, 0, 0, 0]
         asg_rotation[:, 0] = 1
         self.asg_rotation = nn.Parameter(asg_rotation.requires_grad_(True))   # (basis_asg_num, 4)

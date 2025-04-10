@@ -29,6 +29,9 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
 
+import lpips
+loss_fn_alex = lpips.LPIPS(net='vgg')
+
 
 asgmlp_debug = True
 
@@ -96,6 +99,7 @@ def training(modelset, opt, pipe, testing_iterations, saving_iterations, checkpo
     phase_func_freezed = False
     asg_freezed = True
     asg_mlp = False
+    loss_fn_alex.to(gaussians.get_features.device)
 
     if first_iter < unfreeze_iterations:
         gaussians.neural_phasefunc.freeze()
@@ -181,10 +185,12 @@ def training(modelset, opt, pipe, testing_iterations, saving_iterations, checkpo
 
         # only opt with diffuse term at the beginning for a stable training process
         if iteration < opt.spcular_freeze_step + opt.fit_linear_step:   # 只考虑漫反射，不考虑镜面反射，刚开始训练时，先优化漫反射，赋予每个高斯点一个基础颜色
-            render_pkg = render(viewpoint_cam, gaussians, light_stream, calc_stream, local_axises, asg_scales, asg_axises, pipe, bg, fix_labert=True, is_train=prune_visibility, asg_mlp = asg_mlp, iteration = iteration)
+            renderArgs = {"pipe": pipe, "bg_color": bg, "fix_labert": True, "is_train": prune_visibility, "asg_mlp": asg_mlp, "iteration": iteration}
+            render_pkg = render(viewpoint_cam, gaussians, light_stream, calc_stream, local_axises, asg_scales, asg_axises, **renderArgs) 
         else:    # 开始考虑镜面反射             
-            render_pkg = render(viewpoint_cam, gaussians, light_stream, calc_stream, local_axises, asg_scales, asg_axises, pipe, bg, is_train=prune_visibility, asg_mlp = asg_mlp, iteration = iteration)
-        
+            renderArgs = {"pipe": pipe, "bg_color": bg, "is_train": prune_visibility, "asg_mlp": asg_mlp, "iteration": iteration}
+            render_pkg = render(viewpoint_cam, gaussians, light_stream, calc_stream, local_axises, asg_scales, asg_axises, **renderArgs)
+            
         # 此外，取出各个高斯点云坐标、可见性、半径，用于后续修剪
         viewspace_point_tensor, visibility_filter, radii = render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
         image, shadow, other_effects = render_pkg["render"], render_pkg["shadow"], render_pkg["other_effects"]
@@ -251,7 +257,7 @@ def training(modelset, opt, pipe, testing_iterations, saving_iterations, checkpo
 
             # Log and save
             training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), \
-                testing_iterations, scene, render, (pipe, background), gamma=2.2 if modelset.hdr else 1.0)
+                testing_iterations, scene, render, renderArgs, gamma=2.2 if modelset.hdr else 1.0)
             
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
@@ -512,20 +518,26 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
             if config['cameras'] and len(config['cameras']) > 0:
                 l1_test = 0.0
                 psnr_test = 0.0
-                for idx, viewpoint in enumerate(config['cameras']):
-                    render_pkg = renderFunc(viewpoint, scene.gaussians, light_stream, calc_stream, local_axises, asg_scales, asg_axises, *renderArgs)
+                ssim_test = 0.0
+                lpips_test = 0.0
+                for idx, viewpoint_cam in enumerate(config['cameras']):
+                    render_pkg = render(viewpoint_cam, scene.gaussians, light_stream, calc_stream, local_axises, asg_scales, asg_axises, **renderArgs)
                     mimage, shadow, other_effects = render_pkg["render"], render_pkg["shadow"], render_pkg["other_effects"]
                     image = torch.clamp(mimage * shadow + other_effects, 0.0, 1.0)
-                    gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+                    gt_image = torch.clamp(viewpoint_cam.original_image.to("cuda"), 0.0, 1.0)
                     if tb_writer and (idx < 5):
-                        tb_writer.add_images(config['name'] + "_view_{}/render".format(viewpoint.image_name), image[None].pow(1./gamma), global_step=iteration)
+                        tb_writer.add_images(config['name'] + "_view_{}/render".format(viewpoint_cam.image_name), image[None].pow(1./gamma), global_step=iteration)
                         if iteration == testing_iterations[0]:
-                            tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None].pow(1./gamma), global_step=iteration)
+                            tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint_cam.image_name), gt_image[None].pow(1./gamma), global_step=iteration)
                     l1_test += l1_loss(image, gt_image).mean().double()
                     psnr_test += psnr(image, gt_image).mean().double()
+                    ssim_test += ssim(image, gt_image).mean().double()
+                    lpips_test += loss_fn_alex.forward(image, gt_image).squeeze()
                 psnr_test /= len(config['cameras'])
-                l1_test /= len(config['cameras'])          
-                print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
+                l1_test /= len(config['cameras'])
+                ssim_test /= len(config['cameras'])
+                lpips_test /= len(config['cameras'])        
+                print("\n[ITER {}] Evaluating {}: L1 {} PSNR {} SSIM {} LPIPS {}".format(iteration, config['name'], l1_test, psnr_test,ssim_test,lpips_test))
                 if tb_writer:
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)

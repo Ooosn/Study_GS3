@@ -62,8 +62,8 @@ namespace CudaRasterizer
 			const bool hgs=false,
 			const float* hgs_normals=nullptr,
 			const float* hgs_opacities=nullptr,
-			const float* hgs_opacities_shadow=nullptr,
-			const float* hgs_opacities_light=nullptr);
+			float* hgs_opacities_shadow=nullptr,
+			float* hgs_opacities_light=nullptr);
 
 		static void backward(
 			const int P, int D, int M, int R,

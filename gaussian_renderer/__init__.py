@@ -134,7 +134,7 @@ def render(viewpoint_camera,
     )
 
 
-    
+    light_stream.wait_stream(torch.cuda.default_stream())
     with torch.cuda.stream(light_stream):
         # 3）光源方向的高斯泼溅 ———— 高斯场景准备工作: 
         # 1）视角方向的高斯泼溅 ———— 高斯场景准备工作:
@@ -184,7 +184,7 @@ def render(viewpoint_camera,
             !!! 因此出现 流竞争问题，后续需要改进
             """
 
-            light_stream.wait_stream(torch.cuda.default_stream())
+            
             rasterizer_light = GaussianRasterizer_light(raster_settings=raster_settings_light)
             opacity_light = torch.zeros(scales.shape[0], dtype=torch.float32, device=scales.device)
             hgs_opacities_shadow = torch.zeros_like(hgs_opacities, dtype=torch.float32, device=hgs_opacities.device)
@@ -233,8 +233,7 @@ def render(viewpoint_camera,
     # MBDRF 和 SH 的选择
     # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
     # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
-    
-
+    torch.cuda.synchronize()
     shs = None
     colors_precomp = None
     if override_color is None:
@@ -315,6 +314,7 @@ def render(viewpoint_camera,
 
 
             # 等待所有分流完成
+            
             torch.cuda.current_stream().wait_stream(light_stream)  
             torch.cuda.current_stream().wait_stream(calc_stream)
             # shaodow splat values

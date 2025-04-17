@@ -126,8 +126,13 @@ __global__ void duplicateWithKeys(
 	const uint32_t* offsets, // 高斯椭圆写入结束位置
 	uint64_t* gaussian_keys_unsorted, // 高斯椭圆 key 未排序
 	uint32_t* gaussian_values_unsorted, // 高斯椭圆 value 未排序
+	uint4* conic_opacity3,
+	uint4* conic_opacity4,
+	uint4* conic_opacity6,
 	int* radii, // 高斯椭圆半径
-	dim3 grid) // 网格大小.tile 布局，grid.x 是 tile 的列数，grid.y 是 tile 的行数
+	dim3 grid,
+	bool hgs
+	) // 网格大小.tile 布局，grid.x 是 tile 的列数，grid.y 是 tile 的行数
 {
 	auto idx = cg::this_grid().thread_rank();
 	if (idx >= P)
@@ -144,7 +149,16 @@ __global__ void duplicateWithKeys(
 		uint2 rect_min, rect_max;
 
 		// 计算高斯椭圆在图像中的 tile 范围，rect_min 和 rect_max 是 tile 的左下角和右上角坐标
-		getRect(points_xy[idx], radii[idx], rect_min, rect_max, grid);
+		if (hgs)
+		{
+			rect_min.x = conic_opacity3[idx].x;
+			rect_min.y = conic_opacity3[idx].y;
+			rect_max.x = conic_opacity3[idx].z;
+			rect_max.y = conic_opacity3[idx].w;
+		}
+		else{
+			getRect(points_xy[idx], radii[idx], rect_min, rect_max, grid);
+		}
 
 		// For each tile that the bounding rect overlaps, emit a 
 		// key/value pair. The key is |  tile ID  |      depth      |,
@@ -278,6 +292,15 @@ CudaRasterizer::GeometryState CudaRasterizer::GeometryState::fromChunk(char*& ch
 	// added
 	obtain(chunk, geom.radii_comp, P, 128);
 
+	// hgs 相关
+	obtain(chunk, geom.normal, P, 128);
+	obtain(chunk, geom.cov3D_smalls, P * 6, 128);
+	obtain(chunk, geom.conic_opacity1, P, 128);
+	obtain(chunk, geom.conic_opacity2, P, 128);
+	obtain(chunk, geom.conic_opacity3, P, 128);
+	obtain(chunk, geom.conic_opacity4, P, 128);
+	obtain(chunk, geom.conic_opacity5, P, 128);
+	obtain(chunk, geom.conic_opacity6, P, 128);
 
 	/** 
 	* @brief 分配临时buffer 给 前缀和运算 库函数
@@ -392,8 +415,8 @@ int CudaRasterizer::Rasterizer::forward(
 	const bool hgs,
 	const float* hgs_normals,
 	const float* hgs_opacities,
-	const float* hgs_opacities_shadow,
-	const float* hgs_opacities_light
+	float* hgs_opacities_shadow,
+	float* hgs_opacities_light
 	)
 {
 
@@ -473,7 +496,15 @@ int CudaRasterizer::Rasterizer::forward(
 
 		// hgs 相关
 		hgs,
-		hgs_normals
+		hgs_normals,
+		geomState.normal,
+		geomState.cov3D_smalls,
+		geomState.conic_opacity1,
+		geomState.conic_opacity2,
+		geomState.conic_opacity3,
+		geomState.conic_opacity4,
+		geomState.conic_opacity5,
+		geomState.conic_opacity6
 	), debug)
 
 
@@ -484,6 +515,7 @@ int CudaRasterizer::Rasterizer::forward(
 	CHECK_CUDA(cub::DeviceScan::InclusiveSum(geomState.scanning_space, geomState.scan_size, geomState.tiles_touched, geomState.point_offsets, P, MY_STREAM), debug)
 
 
+	// 获得需要计算/渲染的所有高斯点实例，每个高斯对象可能覆盖多个 tile，因此会重复计算，即创建多个实例
 	// Retrieve total number of Gaussian instances to launch and resize aux buffers
 	/**
 	 * @brief 因为缓冲区在 GPU 上，而该函数是 host 函数，不能从 GPU 中直接获取 geomState.point_offsets[p-1]，因此要先把这个值拷贝到 host 上
@@ -493,10 +525,13 @@ int CudaRasterizer::Rasterizer::forward(
 	 * @param cudaMemcpyDeviceToHost ———— 从 GPU 拷贝到 host
 	 * @param &num_rendered ———— 目标地址
 	 * @note num_rendered = geomState.point_offsets[P-1] ———— 所有需要计算/渲染的高斯点数量
+	 * 
+	 * @attention 下面有 host 函数，因此需要同步
 	 */
 	int num_rendered;
-	CHECK_CUDA(cudaMemcpy(&num_rendered, geomState.point_offsets + P - 1, sizeof(int), cudaMemcpyDeviceToHost), debug);
-
+	CHECK_CUDA(cudaMemcpyAsync(&num_rendered, geomState.point_offsets + P - 1, sizeof(int), cudaMemcpyDeviceToHost, MY_STREAM), debug);
+	// CHECK_CUDA(cudaMemcpy(&num_rendered, geomState.point_offsets + P - 1, sizeof(int), cudaMemcpyDeviceToHost), debug);
+	cudaStreamSynchronize(MY_STREAM);
 
 	/**
 	 * @brief binningstate ———— 用于给每个高斯点分到所属的 tile 中
@@ -524,8 +559,13 @@ int CudaRasterizer::Rasterizer::forward(
 		geomState.point_offsets,
 		binningState.point_list_keys_unsorted,
 		binningState.point_list_unsorted,
+		geomState.conic_opacity3,
+		geomState.conic_opacity4,
+		geomState.conic_opacity6,
 		radii,
-		tile_grid)
+		tile_grid,
+		hgs
+		)
 	CHECK_CUDA(, debug)
 
 
@@ -558,8 +598,11 @@ int CudaRasterizer::Rasterizer::forward(
 	 * @param tile_grid.x * tile_grid.y * sizeof(uint2) ———— 设置的内存大小，即这个是要清零的总字节数
 	 * @note uint2 是 2 个 uint 类型，即 2 个 32 位无符号整数，共 64 位，即 8 个字节，需要用 .x 和 .y 访问
 	 * @note imgState.ranges 是用像素数量初始化的，相比于 tile 数量，过大
+	 * 
+	 * @attention 下面是 核函数，因此需要不需要同步
 	 */
-	CHECK_CUDA(cudaMemset(imgState.ranges, 0, tile_grid.x * tile_grid.y * sizeof(uint2)), debug);
+	CHECK_CUDA(cudaMemsetAsync(imgState.ranges, 0, tile_grid.x * tile_grid.y * sizeof(uint2), MY_STREAM), debug);
+	// CHECK_CUDA(cudaMemset(imgState.ranges, 0, tile_grid.x * tile_grid.y * sizeof(uint2)), debug);
 
 
 	/* identifyTileRanges 确定每个 tile 对应的数据范围：
@@ -611,7 +654,15 @@ int CudaRasterizer::Rasterizer::forward(
 		hgs_normals,
 		hgs_opacities,
 		hgs_opacities_shadow,
-		hgs_opacities_light), debug)
+		hgs_opacities_light,
+		geomState.normal,
+		geomState.conic_opacity1,
+		geomState.conic_opacity2
+		), debug)
+
+
+	// 回归 host，同步流
+	cudaStreamSynchronize(MY_STREAM);
 
 	return num_rendered;
 }

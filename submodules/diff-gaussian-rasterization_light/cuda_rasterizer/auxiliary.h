@@ -18,6 +18,11 @@
 #define BLOCK_SIZE (BLOCK_X * BLOCK_Y)	// 每个 Block 启动的线程数量，即 blockDim.x * blockDim.y。
 #define NUM_WARPS (BLOCK_SIZE/32)	// CUDA 每 32 个线程组成一个 Warp
 
+
+struct float6 {
+    float x, y, z, w, u, v;
+};
+
 // Spherical harmonics coefficients
 __device__ const float SH_C0 = 0.28209479177387814f;
 __device__ const float SH_C1 = 0.4886025119029199f;
@@ -41,6 +46,70 @@ __device__ const float SH_C3[] = {
 __forceinline__ __device__ float ndc2Pix(float v, int S)
 {
 	return ((v + 1.0) * S - 1.0) * 0.5;
+}
+
+__forceinline__ __device__ void hgs_getRect_final(const float2 p, int width, int height, int width_small, int height_small, int width_another, int height_another, int width_small_another, int height_small_another, int type, uint2& rect_min, uint2& rect_max, uint2& rect_min_another, uint2& rect_max_another, dim3 grid)
+{
+    uint2 rect_min_large = {
+		min(grid.x, max((int)0, (int)((p.x - width) / BLOCK_X))),
+		min(grid.y, max((int)0, (int)((p.y - height) / BLOCK_Y)))
+	};
+	uint2 rect_max_large = {
+		min(grid.x, max((int)0, (int)((p.x + width + BLOCK_X - 1) / BLOCK_X))),
+		min(grid.y, max((int)0, (int)((p.y + height + BLOCK_Y - 1) / BLOCK_Y)))
+	};
+	uint2 rect_min_small = {
+		min(grid.x, max((int)0, (int)((p.x - width_small) / BLOCK_X))),
+		min(grid.y, max((int)0, (int)((p.y - height_small) / BLOCK_Y)))
+	};
+	uint2 rect_max_small = {
+		min(grid.x, max((int)0, (int)((p.x + width_small + BLOCK_X - 1) / BLOCK_X))),
+		min(grid.y, max((int)0, (int)((p.y + height_small + BLOCK_Y - 1) / BLOCK_Y)))
+	};
+
+	////
+//	rect_min_small.x = (rect_max_large.x - rect_min_large.x)<3?rect_min_large.x: rect_min_small.x;
+//	rect_min_small.y = (rect_max_large.y - rect_min_large.y)<3?rect_min_large.y: rect_min_small.y;
+//	rect_max_small.x = (rect_max_large.x - rect_min_large.x)<3?rect_max_large.x: rect_max_small.x;
+//	rect_max_small.y = (rect_max_large.x - rect_min_large.x)<3?rect_max_large.y: rect_max_small.y;
+	////
+
+	/////////////////////////
+	uint2 rect_min_large_another = {
+		min(grid.x, max((int)0, (int)((p.x - width_another) / BLOCK_X))),
+		min(grid.y, max((int)0, (int)((p.y - height_another) / BLOCK_Y)))
+	};
+	uint2 rect_max_large_another = {
+		min(grid.x, max((int)0, (int)((p.x + width_another + BLOCK_X - 1) / BLOCK_X))),
+		min(grid.y, max((int)0, (int)((p.y + height_another + BLOCK_Y - 1) / BLOCK_Y)))
+	};
+	uint2 rect_min_small_another = {
+		min(grid.x, max((int)0, (int)((p.x - width_small_another) / BLOCK_X))),
+		min(grid.y, max((int)0, (int)((p.y - height_small_another) / BLOCK_Y)))
+	};
+	uint2 rect_max_small_another = {
+		min(grid.x, max((int)0, (int)((p.x + width_small_another + BLOCK_X - 1) / BLOCK_X))),
+		min(grid.y, max((int)0, (int)((p.y + height_small_another + BLOCK_Y - 1) / BLOCK_Y)))
+	};
+	/////////////////////////
+    //return result based on type
+    uint32_t type0 =  static_cast<int>(type == 0);// ? 1 : 0; //determine if type is 0, keep whole gaussian
+    uint32_t type1 =  static_cast<int>(type == 1);// ? 1 : 0; //determine if type is 1,
+    uint32_t type2 =  static_cast<int>(type == 2);// ? 1 : 0; //determine if type is 2
+    uint32_t type3 =  static_cast<int>(type == 3);// ? 1 : 0; //determine if type is 3
+    uint32_t type4 =  static_cast<int>(type == 4);// ? 1 : 0; //determine if type is 4
+
+    rect_min = {(type0 + type1 + type3)*rect_min_large.x + (type2 + type4)*rect_min_small.x, (type0 + type1 + type2)*rect_min_large.y + (type3 + type4)*rect_min_small.y};
+//    rect_max = {(type0 + type2 + type4)*rect_max_large.x + (type1 + type3)*rect_max_small.x, (type0 + type1 + type2)*rect_max_large.y + (type3 + type4)*rect_max_small.y};
+    rect_max = {(type0 + type2 + type4)*rect_max_large.x + (type1 + type3)*rect_max_small.x, (type0 + type3 + type4)*rect_max_large.y + (type1 + type2)*rect_max_small.y};
+
+    ///////////////////////
+    rect_min_another = {(type0 + type4 + type2)*rect_min_large_another.x + (type3 + type1)*rect_min_small_another.x, (type0 + type4 + type3)*rect_min_large_another.y + (type2 + type1)*rect_min_small_another.y};
+//    rect_max_another = {(type0 + type3 + type1)*rect_max_large_another.x + (type4 + type2)*rect_max_small_another.x, (type0 + type4 + type3)*rect_max_large_another.y + (type2 + type1)*rect_max_small_another.y};
+    rect_max_another = {(type0 + type3 + type1)*rect_max_large_another.x + (type4 + type2)*rect_max_small_another.x, (type0 + type2 + type1)*rect_max_large_another.y + (type4 + type3)*rect_max_small_another.y};
+    ///////////////////////
+//    printf("rec top %d, %d, bottom %d, %d. Another top %d, %d, bottom %d, %d\n", rect_min.x,rect_min.y,rect_max.x,rect_max.y, rect_min_another.x,rect_min_another.y,rect_max_another.x,rect_max_another.y);
+//    printf("rec top %d, %d, bottom %d, %d. Another top %d, %d, bottom %d, %d\n", rect_min_large.x,rect_min_large.y,rect_max_large.x,rect_max_large.y, rect_min_small.x,rect_min_small.y,rect_max_small.x,rect_max_small.y);
 }
 
 __forceinline__ __device__ void getRect(const float2 p, int max_radius, uint2& rect_min, uint2& rect_max, dim3 grid)

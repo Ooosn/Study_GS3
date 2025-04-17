@@ -35,17 +35,16 @@
 // 这个函数的作用是 ————  当需要调整张量 t 的大小时，使用这个函数来调整张量的大小，并返回一个指向调整后张量数据的指针。
 // size_t ————  unsigned int 类型，一般用于表示一个对象的大小（以字节为单位），也就是表达一个变量的 size
 // 因此 resizeFunctional 函数 ————  接受一个 torch::Tensor 类型的参数 t，并返回一个 std::function<char*(size_t N)> 类型的函数。 
-
-/* 
- * lamda 表达式 ————  [] 捕捉外部变量，() 需要输入的参数，{} 函数体
- * lamda 表达式 默认是 const 的，如果需要修改外部变量，需要使用 mutable 关键字
- * & 的优先级 高于 const ，即便 变量 是 const 的，也可以修改
-*/
-
 std::function<char*(size_t N)> resizeFunctional(torch::Tensor& t) {
     // 内部 定义 lambda 表达式
 	// auto lambda = ... 让编译器推导 lambda 的类型
+	/* 
+	* lamda 表达式 ————  [] 捕捉外部变量，() 需要输入的参数，{} 函数体
+	* lamda 表达式 默认是 const 的，如果需要修改外部变量，需要使用 mutable & 关键字
+	* & 的优先级 高于 const ，即便 变量 是 const 的，也可以修改
+	*/
 	auto lambda = [&t](size_t N) {
+
 		// torch 函数后面跟_，表示 原地修改
 		// (type)variable ————  将 variable 转换为 type 类型
 		// long long ———— int64_t 类型

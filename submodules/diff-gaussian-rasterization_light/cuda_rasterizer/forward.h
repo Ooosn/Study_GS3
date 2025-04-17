@@ -52,7 +52,16 @@ namespace FORWARD
 
 		// hgs 相关
 		const bool hgs,
-		const float* hgs_normals);
+		const float* hgs_normals,
+		float3* save_normal,
+		float* cov3D_smalls,
+		float4* conic_opacity1,
+		float4* conic_opacity2,
+		uint4* conic_opacity3,
+		uint4* conic_opacity4,
+		float3* conic_opacity5,
+		uint4* conic_opacity6
+		);
 
 	// Main rasterization method.
 	void render(
@@ -82,8 +91,12 @@ namespace FORWARD
 		const bool hgs,
 		const float* hgs_normals,
 		const float* hgs_opacities,
-		const float* hgs_opacities_shadow,
-		const float* hgs_opacities_light);
+		float* hgs_opacities_shadow,
+		float* hgs_opacities_light,
+		const float3* normal,
+		const float4* conic_opacity1,
+		const float4* conic_opacity2
+		);
 }
 
 

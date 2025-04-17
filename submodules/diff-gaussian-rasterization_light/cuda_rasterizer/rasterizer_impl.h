@@ -77,6 +77,15 @@ namespace CudaRasterizer
 		// added
 		float* radii_comp;
 
+		// hgs 相关
+		float3* normal;
+		float* cov3D_smalls;
+		float4* conic_opacity1;
+		float4* conic_opacity2;
+		uint4* conic_opacity3;
+		uint4* conic_opacity4;
+		float3* conic_opacity5;
+		uint4* conic_opacity6;
 
 		// 声明 一个返回 GeometryState 的静态函数 fromChunk
 		static GeometryState fromChunk(char*& chunk, size_t P);

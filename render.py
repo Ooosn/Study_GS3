@@ -26,8 +26,9 @@ from scene.mixture_ASG import Mixture_of_ASG
 from utils.system_utils import searchForMaxIteration
 from rich import print
 from rich.panel import Panel
+import time
 
-def render_set(model_path, name, iteration, views, gaussians, pipeline, background, gamma, write_images=False):
+def render_set(model_path, name, iteration, views, gaussians, pipeline, background, gamma, write_images=False, calculate_fps=False):
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
     gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
 
@@ -44,13 +45,47 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
     render_other_effects = None
     render_base = None
     rendering = None
+
+    if calculate_fps:
+        epoch_num = 5
+        # 记录渲染花费的平均时间
+        total_frames = epoch_num * len(views)
+
+        # warm-up 热身
+        for idx, view in enumerate(tqdm(views, desc="warming up~~~")):
+            _ = render(view, gaussians, light_stream, calc_stream, local_axises, asg_scales, asg_axises, pipeline, background)
+
+        torch.cuda.synchronize()
+        print("-"*10,"let's go","-"*10)
+
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+
+        views = views * epoch_num
+
+        for idx, view in enumerate(tqdm(views, desc="calculating fps...")):
+            render_pkg = render(view, gaussians, light_stream, calc_stream, local_axises, asg_scales, asg_axises, pipeline, background)
+        
+        end.record()
+        torch.cuda.synchronize()
+        elapsed = start.elapsed_time(end)  # 毫秒
+        elapsed_seconds = elapsed / (1000.0*total_frames)
+        print(f"Average render time: {elapsed_seconds:.4f} seconds")
     
-    for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
-        render_pkg = render(view, gaussians, light_stream, calc_stream, local_axises, asg_scales, asg_axises, pipeline, background)
+    else:
+        # 正式渲染
+        for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
+            render_pkg = render(view, gaussians, light_stream, calc_stream, local_axises, asg_scales, asg_axises, pipeline, background)
         render_shadow = render_pkg["shadow"]
         render_other_effects = render_pkg["other_effects"]
         render_base = render_pkg["render"]
         rendering = render_pkg["render"]* render_pkg["shadow"] + render_pkg["other_effects"]
+        # 使用 torch.cuda.synchronize() 确保所有 CUDA 操作完成后再记录时间
+        
+        # 渲染操作已在上面完成
+        
+        # 再次同步确保渲染完全完成后再记录结束时间
         # render_pkg["render"] 
         # * render_pkg["shadow"]   # 存在一些内存泄漏
         # + render_pkg["other_effects"]
@@ -74,6 +109,7 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
             if rendering is not None:
                 torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
             # torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
+            
 
 def render_sets(modelset : ModelParams, 
                 iteration : int, 
@@ -83,7 +119,8 @@ def render_sets(modelset : ModelParams,
                 opt_pose: bool, 
                 gamma: bool,
                 valid: bool,
-                write_images: bool):
+                write_images: bool,
+                calculate_fps: bool):
     modelset.data_device = "cpu"
 
     if opt_pose:
@@ -137,17 +174,17 @@ def render_sets(modelset : ModelParams,
         if valid:
             print("valid")
             render_set(modelset.model_path, "valid", scene.loaded_iter, scene.getValidCameras(), 
-                       gaussians, pipeline, background, gamma, write_images=write_images)
+                       gaussians, pipeline, background, gamma, write_images=write_images, calculate_fps=calculate_fps)
         
         if not skip_train:
             print("train")
             render_set(modelset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), 
-                       gaussians, pipeline, background, gamma, write_images=write_images)
+                       gaussians, pipeline, background, gamma, write_images=write_images, calculate_fps=calculate_fps)
 
         if not skip_test:
             print("test")
             render_set(modelset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), 
-                       gaussians, pipeline, background, gamma, write_images=write_images)
+                       gaussians, pipeline, background, gamma, write_images=write_images, calculate_fps=calculate_fps)
             
 if __name__ == "__main__":
     # Set up command line argument parser
@@ -162,6 +199,7 @@ if __name__ == "__main__":
     parser.add_argument("--opt_pose", action="store_true", default=False)
     parser.add_argument("--valid", action="store_true", default=False)
     parser.add_argument("--write_images", action="store_true", default=False)
+    parser.add_argument("--calculate_fps", action="store_true", default=False)
     
     # 加载训练模型所使用的参数
     args = get_combined_args(parser)
@@ -182,4 +220,4 @@ if __name__ == "__main__":
     safe_state(args.quiet)
 
     render_sets(model.extract(args), args.load_iteration, pipeline.extract(args), \
-                args.skip_train, args.skip_test, args.opt_pose, args.gamma, args.valid, args.write_images)
+                args.skip_train, args.skip_test, args.opt_pose, args.gamma, args.valid, args.write_images, args.calculate_fps)

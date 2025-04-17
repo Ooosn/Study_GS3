@@ -531,7 +531,7 @@ int CudaRasterizer::Rasterizer::forward(
 	int num_rendered;
 	CHECK_CUDA(cudaMemcpyAsync(&num_rendered, geomState.point_offsets + P - 1, sizeof(int), cudaMemcpyDeviceToHost, MY_STREAM), debug);
 	// CHECK_CUDA(cudaMemcpy(&num_rendered, geomState.point_offsets + P - 1, sizeof(int), cudaMemcpyDeviceToHost), debug);
-	cudaStreamSynchronize(MY_STREAM);
+	cudaStreamSynchronize(MY_STREAM);	// 下面有 host 函数，因此需要同步
 
 	/**
 	 * @brief binningstate ———— 用于给每个高斯点分到所属的 tile 中

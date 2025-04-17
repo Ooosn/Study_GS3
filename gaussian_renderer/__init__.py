@@ -134,7 +134,7 @@ def render(viewpoint_camera,
     )
 
 
-    light_stream.wait_stream(torch.cuda.default_stream())
+    
     with torch.cuda.stream(light_stream):
         # 3）光源方向的高斯泼溅 ———— 高斯场景准备工作: 
         # 1）视角方向的高斯泼溅 ———— 高斯场景准备工作:
@@ -160,13 +160,18 @@ def render(viewpoint_camera,
         else:
             scales = gau.get_scaling
             rotations = gau.get_rotation
-
+        
         ##### select implementation method: torch or cuda
         # 目前代码撤销了 torch 的实现，只保留了 cuda 的实现
         if gau.use_hgs:
             cov3Ds_precomp_small = None
             if len(gau.small_gaussian) != 0:
                 cov3Ds_precomp_small = gau.small_gaussian
+
+
+        # 标准来看会造成死锁，但是由于每次循环三个流基本同步，light_stream 在 default 等待light前抵达，因此不会造成死锁
+        # 不建议
+        light_stream.wait_stream(torch.cuda.default_stream())
 
 
         # 3）光源方向的高斯泼溅 ———— 光源方向高斯泼溅信息计算: 
@@ -181,9 +186,8 @@ def render(viewpoint_camera,
             # 已修改，通过 c10/cuda/CUDAStream.h 来声明流
             """
             !!! 怀疑 GaussianRasterizer_light 中的某些操作绑定了固定流，因此采用异步时，一些流可能绑定了新流，一些流依然在旧流中
-            !!! 因此出现 流竞争问题，后续需要改进
+            !!! 因此出现 流竞争问题，后续需要改进。已修复 ———— 4.17
             """
-
             
             rasterizer_light = GaussianRasterizer_light(raster_settings=raster_settings_light)
             opacity_light = torch.zeros(scales.shape[0], dtype=torch.float32, device=scales.device)
@@ -233,7 +237,6 @@ def render(viewpoint_camera,
     # MBDRF 和 SH 的选择
     # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
     # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
-    torch.cuda.synchronize()
     shs = None
     colors_precomp = None
     if override_color is None:

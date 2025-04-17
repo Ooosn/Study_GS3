@@ -102,12 +102,13 @@ def loadCam(args, id, cam_info, resolution_scale):
     if resized_image_rgb.shape[1] == 4:
         loaded_mask = resized_image_rgb[3:4, ...]
 
+    use_hgs_finetune = getattr(args, "use_hgs_finetune", False)
     return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY, cx=cam_cx, cy=cam_cy,
                   image=gt_image, gt_alpha_mask=loaded_mask,
                   pl_pos=cam_info.pl_pos, pl_intensity=cam_info.pl_intensity,
                   image_name=cam_info.image_name, uid=id, data_device=args.data_device, 
-                  is_hdr=args.hdr, image_path=cam_info.image_path)
+                  is_hdr=args.hdr, image_path=cam_info.image_path, use_hgs_finetune = use_hgs_finetune)
 
 # Load cameras from a list of CameraInfo objects and return a list of Camera objects
 # 根据 resolution_scale 和 args 从 CameraInfo 对象列表中加载相机和对应的图片进行修改，返回 Camera 对象列表

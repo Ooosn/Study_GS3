@@ -70,6 +70,11 @@ class GaussianModel:
         alpha_change         = getattr(modelset, "alpha_change", False)  # 控制是否在训练过程中改变 alpha_asg 的维度，从1变为3
         asg_alpha_num        = getattr(modelset, "asg_alpha_num", 1)  # 控制开始的 alpha_asg 的维度，从1变为3
 
+
+        use_hgs              = getattr(modelset, "use_hgs", False)
+        use_hgs_finetune     = getattr(modelset, "use_hgs_finetune", False)
+        
+
         # 检查参数设置
         if alpha_change and asg_alpha_num == 3:
             assert asg_channel_num == 1, "alpha_change 和 asg_alpha_num 不能同时启动"
@@ -147,10 +152,12 @@ class GaussianModel:
         self.global_call_counter = 0
 
         # hgs
-        self.use_hgs = False
+        self.use_hgs = use_hgs
+        self.use_hgs_finetune = use_hgs_finetune
         self._hgs_normals = torch.empty(0)
         self._hgs_opacities = torch.empty(0)
         self._small_gaussian = torch.empty(0)
+
 
     def capture(self):
         return {
@@ -204,8 +211,8 @@ class GaussianModel:
                     setattr(self, key, value)  # 直接赋值
                     if isinstance(value, torch.Tensor):
                         print(value.shape)
-
-            self.optimizer.load_state_dict(model_args["optimizer"])
+            if not self.use_hgs_finetune:
+                self.optimizer.load_state_dict(model_args["optimizer"])
             
         else: # 加载旧模型
             (self.active_sh_degree, 
@@ -458,6 +465,22 @@ class GaussianModel:
     """
     def training_setup(self, training_args):
 
+
+        if self.use_hgs_finetune:
+            for i in vars(self):
+                param = getattr(self, i)
+                if isinstance(param, nn.Parameter):
+                    param.requires_grad = False
+                    
+            self._hgs_normals.requires_grad = True
+            self._hgs_opacities.requires_grad = False
+
+            for i in vars(self.asg_func):
+                param = getattr(self.asg_func, i)
+                if isinstance(param, nn.Parameter):
+                    param.requires_grad = False
+            self.neural_phasefunc.freeze()
+
         # 修建参数初始化
         self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
@@ -487,7 +510,7 @@ class GaussianModel:
         
         if self.use_hgs:
             l.append({'params': [self._hgs_normals], 'lr': 0.003, "name": "hgs_normals"})
-            l.append({'params': [self._hgs_opacities], 'lr': 0.003, "name": "hgs_opacities"})
+            l.append({'params': [self._hgs_opacities], 'lr': training_args.opacity_lr, "name": "hgs_opacities"})
 
         # 利用 Adam 优化器优化参数组 l
         # 不同参数学习率不同，并且有些参数可能未设置学习率，因此 lr 设置为0，在 update_learning_rate 中更新
@@ -515,6 +538,16 @@ class GaussianModel:
                                                     lr_final=training_args.neural_phasefunc_lr_final,
                                                     lr_delay_mult=training_args.neural_phasefunc_lr_delay_mult,
                                                     max_steps=training_args.neural_phasefunc_lr_max_steps)
+        
+        self.hgs_normals_scheduler_args = get_expon_lr_func(lr_init=0.003,
+                                                    lr_final=0.00003,
+                                                    lr_delay_mult=0.01,
+                                                    max_steps=150_000)
+        
+        self.hgs_opacities_scheduler_args = get_expon_lr_func(lr_init=0.003,
+                                                    lr_final=0.00003,
+                                                    lr_delay_mult=0.01,
+                                                    max_steps=150_000)
 
     # 根据当前迭代次数调整学习率
     def update_learning_rate(self, iteration, asg_freeze_step=0, local_q_freeze_step=0, freeze_phasefunc_steps=0):
@@ -532,6 +565,9 @@ class GaussianModel:
             if param_group["name"] == ["neural_phasefunc", "neural_material"]:
                 lr = self.neural_phasefunc_scheduler_args(max(0, iteration - freeze_phasefunc_steps))
                 param_group['lr'] = lr
+            if param_group["name"] == "hgs_normals":
+                lr = self.hgs_normals_scheduler_args(max(0, iteration - asg_freeze_step))
+                param_group['lr'] = lr  
 
     # 创建了一个 属性索引列表，用于下文的 ply 读取和存储 ———— ！！！因此要求这里的顺序和后面存储时的数据组合顺序要一致
     # 但是这里只有 每个高斯点的属性，不包括神经网络参数和公用参数，比如asg基函数
@@ -751,6 +787,7 @@ class GaussianModel:
 
     def reset_opacity(self):
         opacities_new = inverse_sigmoid(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
+        opacities_new = inverse_sigmoid(torch.max(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]
 

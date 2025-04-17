@@ -8,6 +8,8 @@
  *
  * For inquiries contact  george.drettakis@inria.fr
  */
+#include "stream.h"
+
 
 #include "rasterizer_impl.h"
 
@@ -242,7 +244,7 @@ void CudaRasterizer::Rasterizer::markVisible(
 {	
 	// 启动 checkFrustum 核函数 ———— 检查每个高斯点是否在视图范围内
 	// checkFrustum 会为每个高斯点调用 in_frustum 函数
-	checkFrustum << <(P + 255) / 256, 256 >> > (
+	checkFrustum << <(P + 255) / 256, 256, 0, MY_STREAM>> > (
 		P,
 		means3D,
 		viewmatrix, projmatrix,
@@ -290,7 +292,7 @@ CudaRasterizer::GeometryState CudaRasterizer::GeometryState::fromChunk(char*& ch
 	* @note 当传入指针不为 nullptr 时，cub 会对 tiles_touched 做前缀和运算，并把结果写进 tiles_touched
 	* @note 前缀和运算 ———— 给定一个数组，输出一个新数组，其中每个元素是前面所有元素的“累加和”，这正是之前参数 offsets 的实现
 	*/
-	cub::DeviceScan::InclusiveSum(nullptr, geom.scan_size, geom.tiles_touched, geom.tiles_touched, P);
+	cub::DeviceScan::InclusiveSum(nullptr, geom.scan_size, geom.tiles_touched, geom.tiles_touched, P, MY_STREAM	);
 	obtain(chunk, geom.scanning_space, geom.scan_size, 128);
 	obtain(chunk, geom.point_offsets, P, 128);
 	return geom;
@@ -335,7 +337,7 @@ CudaRasterizer::BinningState CudaRasterizer::BinningState::fromChunk(char*& chun
 	cub::DeviceRadixSort::SortPairs(
 		nullptr, binning.sorting_size,
 		binning.point_list_keys_unsorted, binning.point_list_keys,
-		binning.point_list_unsorted, binning.point_list, P);
+		binning.point_list_unsorted, binning.point_list, P, int(0), int(64), MY_STREAM);
 	obtain(chunk, binning.list_sorting_space, binning.sorting_size, 128);
 	return binning;
 }
@@ -384,7 +386,15 @@ int CudaRasterizer::Rasterizer::forward(
 	float* non_trans,
 	const float offset,
 	const float thres,
-    const bool is_train)
+    const bool is_train,
+	
+	// hgs 相关
+	const bool hgs,
+	const float* hgs_normals,
+	const float* hgs_opacities,
+	const float* hgs_opacities_shadow,
+	const float* hgs_opacities_light
+	)
 {
 
 	// 计算焦距
@@ -459,7 +469,11 @@ int CudaRasterizer::Rasterizer::forward(
 		geomState.tiles_touched,
 		prefiltered,
 		// added
-		geomState.radii_comp
+		geomState.radii_comp,
+
+		// hgs 相关
+		hgs,
+		hgs_normals
 	), debug)
 
 
@@ -467,7 +481,7 @@ int CudaRasterizer::Rasterizer::forward(
 	// E.g., [2, 3, 0, 2, 1] -> [2, 5, 5, 7, 8]
 	// 之前分配了 geomState.scanning_space 内存，现在使用 cub::DeviceScan::InclusiveSum 函数 真正的 计算前缀和，并存入 geomState.point_offsets
 	// geomState.point_offsets[p-1] ———— 所有 [ tile | depth ] - idx 键值对 的数量，也就是所有需要计算/渲染的高斯点数量
-	CHECK_CUDA(cub::DeviceScan::InclusiveSum(geomState.scanning_space, geomState.scan_size, geomState.tiles_touched, geomState.point_offsets, P), debug)
+	CHECK_CUDA(cub::DeviceScan::InclusiveSum(geomState.scanning_space, geomState.scan_size, geomState.tiles_touched, geomState.point_offsets, P, MY_STREAM), debug)
 
 
 	// Retrieve total number of Gaussian instances to launch and resize aux buffers
@@ -502,7 +516,8 @@ int CudaRasterizer::Rasterizer::forward(
 	 * @brief 生成 每个高斯点 的 [ tile | depth ] key 和 对应的 重复高斯点索引，
 	 *		 - 并存放在 binningState.point_list_keys_unsorted 和 binningState.point_list_unsorted 中
 	 */
-	duplicateWithKeys << <(P + 255) / 256, 256 >> > (
+	
+	duplicateWithKeys << <(P + 255) / 256, 256, 0, MY_STREAM>> > (
 		P,
 		geomState.means2D,
 		geomState.depths,
@@ -531,7 +546,7 @@ int CudaRasterizer::Rasterizer::forward(
 		binningState.sorting_size,
 		binningState.point_list_keys_unsorted, binningState.point_list_keys,
 		binningState.point_list_unsorted, binningState.point_list,
-		num_rendered, 0, 32 + bit), debug)
+		num_rendered, 0, 32 + bit, MY_STREAM), debug)
 
 
 	/**
@@ -554,7 +569,7 @@ int CudaRasterizer::Rasterizer::forward(
 	 * 因此，imgState.ranges 中每个元素表示一个 tile 的按 深度排序后的 高斯点 索引范围
 	 */ 
 	if (num_rendered > 0)
-		identifyTileRanges << <(num_rendered + 255) / 256, 256 >> > (
+		identifyTileRanges << <(num_rendered + 255) / 256, 256, 0, MY_STREAM>> > (
 			num_rendered,
 			binningState.point_list_keys,
 			imgState.ranges);
@@ -589,7 +604,14 @@ int CudaRasterizer::Rasterizer::forward(
 	    is_train,
 		
 		// added
-		geomState.radii_comp), debug)
+		geomState.radii_comp,
+		
+		// hgs 相关
+		hgs,
+		hgs_normals,
+		hgs_opacities,
+		hgs_opacities_shadow,
+		hgs_opacities_light), debug)
 
 	return num_rendered;
 }

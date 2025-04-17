@@ -56,7 +56,14 @@ namespace CudaRasterizer
 			float* non_trans=nullptr,
 			const float offset=0.015,
 			const float thres=4,
-			const bool is_train=false);
+			const bool is_train=false,
+			
+			// hgs相关
+			const bool hgs=false,
+			const float* hgs_normals=nullptr,
+			const float* hgs_opacities=nullptr,
+			const float* hgs_opacities_shadow=nullptr,
+			const float* hgs_opacities_light=nullptr);
 
 		static void backward(
 			const int P, int D, int M, int R,

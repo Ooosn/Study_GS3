@@ -8,6 +8,7 @@
  *
  * For inquiries contact  george.drettakis@inria.fr
  */
+#include "stream.h"
 
 #include "forward.h"
 #include "auxiliary.h"
@@ -178,7 +179,11 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	const dim3 grid,
 	uint32_t* tiles_touched,
 	bool prefiltered,
-	float* radii_comp)
+	float* radii_comp,
+
+	// hgs 相关
+	const bool hgs,
+	const float* hgs_normals)
 {
 	auto idx = cg::this_grid().thread_rank();
 	if (idx >= P)
@@ -318,7 +323,14 @@ renderCUDA(
 	const bool is_train,
 	
 	// added
-	const float* __restrict__ radii_comp)
+	const float* __restrict__ radii_comp,
+	
+	// hgs 相关
+	const bool hgs,
+	const float* __restrict__ hgs_normals,
+	const float* __restrict__ hgs_opacities,
+	const float* __restrict__ hgs_opacities_shadow,
+	const float* __restrict__ hgs_opacities_light)
 {
 	// Identify current tile and associated min/max pixel range.
 	// 启动所有像素的线程，每个线程处理一个像素
@@ -672,12 +684,19 @@ void FORWARD::render(
 	const float offset,
 	const float thres,
 	const bool is_train,
-	const float* radii_comp)
+	const float* radii_comp,
+
+	// hgs 相关
+	const bool hgs,
+	const float* hgs_normals,
+	const float* hgs_opacities,
+	const float* hgs_opacities_shadow,
+	const float* hgs_opacities_light)
 {	
 	// 瓦片并行渲染 -> 像素并行渲染
 	// 启动 grid*block 个线程，也就是像素数量（可能大于图像像素数量，因为向上取整）
 	// 每个 block 是一个 tile，每个线程处理 tile 中的一个像素，block 内线程共享内存协作完成该 tile 的像素渲染。
-	renderCUDA<NUM_CHANNELS> << <grid, block >> > ( 
+	renderCUDA<NUM_CHANNELS> << <grid, block, 0, MY_STREAM>> > ( 
 		ranges,
 		point_list,
 		W, H,
@@ -695,7 +714,14 @@ void FORWARD::render(
 		offset,
 		thres,
 		is_train,
-		radii_comp);
+		radii_comp,
+		
+		// hgs 相关
+		hgs,
+		hgs_normals,
+		hgs_opacities,
+		hgs_opacities_shadow,
+		hgs_opacities_light);
 }
 
 void FORWARD::preprocess(int P, int D, int M,
@@ -723,9 +749,13 @@ void FORWARD::preprocess(int P, int D, int M,
 	const dim3 grid,
 	uint32_t* tiles_touched,
 	bool prefiltered,
-	float* radii_comp)
+	float* radii_comp,
+	
+	// hgs 相关
+	const bool hgs,
+	const float* hgs_normals)
 {
-	preprocessCUDA<NUM_CHANNELS> << <(P + 255) / 256, 256 >> > (
+	preprocessCUDA<NUM_CHANNELS> << <(P + 255) / 256, 256, 0, MY_STREAM>> > (
 		P, D, M,
 		means3D,
 		scales,
@@ -751,5 +781,9 @@ void FORWARD::preprocess(int P, int D, int M,
 		grid,
 		tiles_touched,
 		prefiltered,
-		radii_comp);
+		radii_comp,
+		
+		// hgs 相关
+		hgs,
+		hgs_normals);
 }

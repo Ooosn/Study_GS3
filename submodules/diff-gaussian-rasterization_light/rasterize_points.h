@@ -14,6 +14,8 @@
 #include <cstdio>
 #include <tuple>
 #include <string>
+#include <pybind11/pybind11.h>
+namespace py = pybind11;
 	
 std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 RasterizeGaussiansCUDA(
@@ -46,7 +48,9 @@ RasterizeGaussiansCUDA(
 	// hgs 相关
 	const bool hgs,
 	const torch::Tensor& hgs_normals,
-	const torch::Tensor& hgs_opacities
+	const torch::Tensor& hgs_opacities,
+	const torch::Tensor& hgs_opacities_shadow,
+	const torch::Tensor& hgs_opacities_light
 	);
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>

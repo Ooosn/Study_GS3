@@ -47,6 +47,8 @@ class GaussianRasterizer(nn.Module):
         cov3Ds_precomp = kwargs.get("cov3Ds_precomp", None)
         hgs_normals = kwargs.get("hgs_normals", None)
         hgs_opacities = kwargs.get("hgs_opacities", None)
+        hgs_opacities_shadow = kwargs.get("hgs_opacities_shadow", None)
+        hgs_opacities_light = kwargs.get("hgs_opacities_light", None)
 
 
         if (shs is None and colors_precomp is None) or (shs is not None and colors_precomp is not None):
@@ -69,6 +71,10 @@ class GaussianRasterizer(nn.Module):
             kwargs["hgs_normals"] = torch.Tensor([])
         if hgs_opacities is None:
             kwargs["hgs_opacities"] = torch.Tensor([])
+        if hgs_opacities_shadow is None:
+            kwargs["hgs_opacities_shadow"] = torch.Tensor([])
+        if hgs_opacities_light is None:
+            kwargs["hgs_opacities_light"] = torch.Tensor([])
 
         # Invoke C++/CUDA rasterization routine
         return rasterize_gaussians(**kwargs)
@@ -89,9 +95,10 @@ def rasterize_gaussians(**kwargs):
 
         # hgs 相关
         "hgs", "hgs_normals", "hgs_opacities",
+        "hgs_opacities_shadow", "hgs_opacities_light",
 
         # 流
-        "light_stream"
+        "streams"
     ]
     args = [kwargs[k] for k in param_order]
     return _RasterizeGaussians.apply(*args)
@@ -122,9 +129,11 @@ class _RasterizeGaussians(torch.autograd.Function):
         hgs,
         hgs_normals,
         hgs_opacities,
+        hgs_opacities_shadow,
+        hgs_opacities_light,
 
         # 流
-        light_stream
+        streams
     ):
         
         # Restructure arguments the way that the C++ lib expects them
@@ -161,10 +170,12 @@ class _RasterizeGaussians(torch.autograd.Function):
             # hgs 相关
             hgs,
             hgs_normals,
-            hgs_opacities
+            hgs_opacities,
+            hgs_opacities_shadow,
+            hgs_opacities_light,
 
             # 流
-            # light_stream
+            #streams
         )
 
         # Invoke C++/CUDA rasterizer
@@ -206,7 +217,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         return color, out_weight, radii, trans
 
     @staticmethod
-    def backward(ctx, grad_out_color, _, __, grad_out_trans):
+    def backward(ctx, grad_out_color, _, __, grad_out_trans, *args):
 
         # Restore necessary values from context
         num_rendered = ctx.num_rendered
@@ -275,6 +286,8 @@ class _RasterizeGaussians(torch.autograd.Function):
             None,
 
             # hgs 相关
+            None,
+            None,
             None,
             None,
             None,

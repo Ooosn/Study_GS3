@@ -48,7 +48,11 @@ namespace FORWARD
 		bool prefiltered,
 		
 		//added
-		float* radii_comp);
+		float* radii_comp,
+
+		// hgs 相关
+		const bool hgs,
+		const float* hgs_normals);
 
 	// Main rasterization method.
 	void render(
@@ -72,7 +76,14 @@ namespace FORWARD
     	const bool is_train,
 		
 		//added
-		const float* radii_comp);
+		const float* radii_comp,
+
+		// hgs 相关
+		const bool hgs,
+		const float* hgs_normals,
+		const float* hgs_opacities,
+		const float* hgs_opacities_shadow,
+		const float* hgs_opacities_light);
 }
 
 

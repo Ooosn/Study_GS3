@@ -89,7 +89,8 @@ class ModelParams(ParamGroup):
         self.asg_mlp = False
         self.alpha_change = False
         self.asg_alpha_num = 1
-        
+        self.use_hgs_finetune = False
+        self.load_num = 400
 
         super().__init__(parser, "Loading Parameters", sentinel)
 

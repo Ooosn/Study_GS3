@@ -57,9 +57,10 @@ std::function<char*(size_t N)> resizeFunctional(torch::Tensor& t) {
 		*/
         t.resize_({(long long)N});
 		// reinterpret_cast<char*> ————  直接改变指针类型，将 t 的内存地址转换为 char* 类型
-		// t.contiguous().data_ptr() ————  返回 t 的内存地址
+		// t.contiguous().data_ptr<T>() ————  返回 t 所控制的数据的内存地址，类型为 T*
 		/*
-		 * data_ptr() 返回指向 t 数据的原始指针，但返回类型是 void*，需要转换为 char* 类型
+		 * data_ptr<>() 是 torch::Tensor 的成员函数，返回其控制的数据在内存中的地址，类型为 T*，
+		 *			     用于将数据以裸指针形式传入核函数（CUDA kernel），因为 CUDA 只能处理最基础的 C 风格指针。
 		 * void* 只能用于存储地址，不能用于运算
 		 * reinterpret_cast<> ————  让 void* 变成可用的类型，比如 reinterpret_cast<> 告诉编译器：“我明确知道这个 void* 其实是 int* 类型，请放心使用”
 		*/ 
@@ -111,7 +112,9 @@ RasterizeGaussiansCUDA(
 	// hgs 相关
 	const bool hgs,
 	const torch::Tensor& hgs_normals,
-	const torch::Tensor& hgs_opacities
+	const torch::Tensor& hgs_opacities,
+	const torch::Tensor& hgs_opacities_shadow,
+	const torch::Tensor& hgs_opacities_light
 	)
 {
 // 检查 means3D 的维度是否为 2，且第二维的大小是否为 3
@@ -226,7 +229,15 @@ RasterizeGaussiansCUDA(
 		non_trans.contiguous().data<float>(),	// FORWARD::render, 也会被修改
 		offset,
 		thres,
-		is_train);
+		is_train,
+
+		// hgs 相关
+		hgs,
+		hgs_normals.contiguous().data<float>(),
+		hgs_opacities.contiguous().data<float>(),	
+		hgs_opacities_shadow.contiguous().data<float>(),
+		hgs_opacities_light.contiguous().data<float>()
+		);
   }
 
   // 返回 前向传播的 结果

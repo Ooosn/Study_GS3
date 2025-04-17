@@ -134,94 +134,97 @@ def render(viewpoint_camera,
     )
 
 
-
-    # 3）光源方向的高斯泼溅 ———— 高斯场景准备工作: 
-    # 1）视角方向的高斯泼溅 ———— 高斯场景准备工作:
-
-    # 获得高斯点的 3D坐标、透明度、并初始化 2D坐标
-    # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
-    screenspace_points = torch.zeros_like(gau.get_xyz, dtype=gau.get_xyz.dtype, requires_grad=False, device="cuda") + 0
-    means3D = gau.get_xyz
-    means2D = screenspace_points
-    opacity = gau.get_opacity
-    hgs_normals = gau.get_hgs_normals
-    hgs_opacities = gau.get_hgs_opacities
-
-
-    # 计算高斯点的方差:
-    # If precomputed 3d covariance is provided, use it. If not, then it will be computed from
-    # scaling / rotation by the rasterizer.
-    scales = None
-    rotations = None
-    cov3Ds_precomp = None
-    if pipe.compute_cov3D_python:
-        cov3Ds_precomp = gau.get_covariance(scaling_modifier)
-    else:
-        scales = gau.get_scaling
-        rotations = gau.get_rotation
-
-    ##### select implementation method: torch or cuda
-    # 目前代码撤销了 torch 的实现，只保留了 cuda 的实现
-    if gau.use_hgs:
-        cov3Ds_precomp_small = None
-        if len(gau.small_gaussian) != 0:
-            cov3Ds_precomp_small = gau.small_gaussian
-
-
-    # 3）光源方向的高斯泼溅 ———— 光源方向高斯泼溅信息计算: 
-
-    # shadow splatting
-    light_stream.wait_stream(torch.cuda.current_stream())   # 等待计算完成，因为下面要使用新的流，且有依赖   
-    if gau.use_MBRDF:
-        with torch.no_grad():
-            with torch.cuda.stream(light_stream):
-                """
-                !!! 阴影 shadow 从已有的高斯场景信息计算的，不是用来优化高斯本身，因此这里不能有梯度 
-                """   
-                # with torch.cuda.stream(light_stream):   # 在光源流中进行计算 # 撤销，由于 cub 等库的原因，需要显式声明流，懒得改了
-                """
-                !!! 怀疑 GaussianRasterizer_light 中的某些操作绑定了固定流，因此采用异步时，一些流可能绑定了新流，一些流依然在旧流中
-                !!! 因此出现 流竞争问题，后续需要改进
-                """
-
-
-                rasterizer_light = GaussianRasterizer_light(raster_settings=raster_settings_light)
-                opacity_light = torch.zeros(scales.shape[0], dtype=torch.float32, device=scales.device)
-                light_inputs = {
-                    # 高斯点相关
-                    "means3D": means3D,
-                    "means2D": means2D,
-                    "shs": None,
-                    "colors_precomp": torch.zeros((2, 3), dtype=torch.float32, device=scales.device),
-                    "opacities": opacity,
-                    "scales": scales,
-                    "rotations": rotations,
-                    "cov3Ds_precomp": cov3Ds_precomp,
-
-                    # 阴影相关
-                    "non_trans": opacity_light,
-                    "offset": 0.015,
-                    "thres": -1,
-
-                    # prune 相关
-                    "is_train": is_train,
-                    
-                    # hgs 相关
-                    "hgs": gau.use_hgs,
-                    "hgs_normals": hgs_normals,
-                    "hgs_opacities": hgs_opacities,
-
-                    # 流
-                    "light_stream": light_stream,
-
-                }
-
-                if gau.use_hgs:
-                    shadow, out_weight = DifferentiableShadow.apply(hgs_normals, rasterizer_light, light_inputs)
-                else:
-                    _, out_weight, _, shadow = rasterizer_light(**light_inputs)
-
     
+    with torch.cuda.stream(light_stream):
+        # 3）光源方向的高斯泼溅 ———— 高斯场景准备工作: 
+        # 1）视角方向的高斯泼溅 ———— 高斯场景准备工作:
+
+        # 获得高斯点的 3D坐标、透明度、并初始化 2D坐标
+        # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
+        screenspace_points = torch.zeros_like(gau.get_xyz, dtype=gau.get_xyz.dtype, requires_grad=False, device="cuda") + 0
+        means3D = gau.get_xyz
+        means2D = screenspace_points
+        opacity = gau.get_opacity
+        hgs_normals = gau.get_hgs_normals
+        hgs_opacities = gau.get_hgs_opacities
+
+
+        # 计算高斯点的方差:
+        # If precomputed 3d covariance is provided, use it. If not, then it will be computed from
+        # scaling / rotation by the rasterizer.
+        scales = None
+        rotations = None
+        cov3Ds_precomp = None
+        if pipe.compute_cov3D_python:
+            cov3Ds_precomp = gau.get_covariance(scaling_modifier)
+        else:
+            scales = gau.get_scaling
+            rotations = gau.get_rotation
+
+        ##### select implementation method: torch or cuda
+        # 目前代码撤销了 torch 的实现，只保留了 cuda 的实现
+        if gau.use_hgs:
+            cov3Ds_precomp_small = None
+            if len(gau.small_gaussian) != 0:
+                cov3Ds_precomp_small = gau.small_gaussian
+
+
+        # 3）光源方向的高斯泼溅 ———— 光源方向高斯泼溅信息计算: 
+
+        # shadow splatting
+           # 等待计算完成，因为下面要使用新的流，且有依赖   
+        if gau.use_MBRDF:
+            """
+            !!! 阴影 shadow 从已有的高斯场景信息计算的，不是用来优化高斯本身，因此这里不能有梯度 
+            """   
+            # with torch.cuda.stream(light_stream):   # 在光源流中进行计算 # 撤销，由于 cub 等库的原因，需要显式声明流，懒得改了
+            # 已修改，通过 c10/cuda/CUDAStream.h 来声明流
+            """
+            !!! 怀疑 GaussianRasterizer_light 中的某些操作绑定了固定流，因此采用异步时，一些流可能绑定了新流，一些流依然在旧流中
+            !!! 因此出现 流竞争问题，后续需要改进
+            """
+
+            light_stream.wait_stream(torch.cuda.default_stream())
+            rasterizer_light = GaussianRasterizer_light(raster_settings=raster_settings_light)
+            opacity_light = torch.zeros(scales.shape[0], dtype=torch.float32, device=scales.device)
+            hgs_opacities_shadow = torch.zeros_like(hgs_opacities, dtype=torch.float32, device=hgs_opacities.device)
+            hgs_opacities_light = torch.zeros_like(hgs_opacities, dtype=torch.float32, device=hgs_opacities.device)
+            light_inputs = {
+                # 高斯点相关
+                "means3D": means3D,
+                "means2D": means2D,
+                "shs": None,
+                "colors_precomp": torch.zeros((2, 3), dtype=torch.float32, device=scales.device),
+                "opacities": opacity,
+                "scales": scales,
+                "rotations": rotations,
+                "cov3Ds_precomp": cov3Ds_precomp,
+
+                # 阴影相关
+                "non_trans": opacity_light,
+                "offset": 0.015,
+                "thres": -1,
+
+                # prune 相关
+                "is_train": is_train,
+                
+                # hgs 相关
+                "hgs": gau.use_hgs,
+                "hgs_normals": hgs_normals,
+                "hgs_opacities": hgs_opacities,
+                "hgs_opacities_shadow": hgs_opacities_shadow,
+                "hgs_opacities_light": hgs_opacities_light,
+
+                # 流
+                "streams": None # 暂时没用，（用于内部多个流）
+
+            }
+
+            if gau.use_hgs:
+                    shadow, out_weight = DifferentiableShadow.apply(hgs_normals, rasterizer_light, light_inputs)
+            else:
+                with torch.no_grad():
+                    _, out_weight, _, shadow = rasterizer_light(**light_inputs)
 
 
 
@@ -312,7 +315,7 @@ def render(viewpoint_camera,
 
 
             # 等待所有分流完成
-            torch.cuda.current_stream().wait_stream(light_stream)  # 撤销，有bug
+            torch.cuda.current_stream().wait_stream(light_stream)  
             torch.cuda.current_stream().wait_stream(calc_stream)
             # shaodow splat values
             opacity_light = torch.clamp_min(opacity_light, 1e-6)    # 防止最小值为0，产生 NaN
@@ -551,7 +554,7 @@ class DifferentiableShadow(torch.autograd.Function):
 
             # 保存梯度用于 backward
             ctx.save_for_backward(grad_shadow_n)
-            return shadow, out_weight     # [N,1], [N,1]
+            return shadow, out_weight  # [N,1], [N,1], [N,1]
 
     @staticmethod
     def backward(ctx, grad_output_shadow, grad_output_weight):

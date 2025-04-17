@@ -42,7 +42,7 @@ class Scene:
     gaussians : GaussianModel
                           
     def __init__(self, 
-                 args : ModelParams,  # 传入模型参数，这里的args其实就是前文的 dataset # args.data_device 可以为 cpu 或 cuda
+                 args : ModelParams,  # 传入模型参数
                  gaussians : GaussianModel, 
                  opt=None, # opt ： OptimizationParams 类型，优化参数
                  load_iteration=None, 
@@ -96,7 +96,7 @@ class Scene:
                            ply_path=ply_path)   # 点云信息地址，不存在则随机初始化
             """
             if not args.wang_debug:
-                scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval, args.view_num, \
+                scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval, args.view_num, args.load_num, \
                                                            valid=valid, skip_train=skip_train, skip_test=skip_test,
                                                            extension=".exr" if args.hdr else ".png")
         else:

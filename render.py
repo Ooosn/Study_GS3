@@ -27,7 +27,7 @@ from utils.system_utils import searchForMaxIteration
 from rich import print
 from rich.panel import Panel
 
-def render_set(model_path, name, iteration, views, gaussians, pipeline, background, gamma, write_image=False):
+def render_set(model_path, name, iteration, views, gaussians, pipeline, background, gamma, write_images=False):
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
     gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
 
@@ -55,7 +55,7 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
         # * render_pkg["shadow"]   # 存在一些内存泄漏
         # + render_pkg["other_effects"]
         # gt = view.original_image[0:3, :, :]
-        if write_image:
+        if write_images:
             # 如果图片是 hdr 格式，则 gamma 校正
             # png 格式，是直接在 sRGB 空间 下重建的，因此不需要 gamma 校正
             if gamma:
@@ -83,7 +83,7 @@ def render_sets(modelset : ModelParams,
                 opt_pose: bool, 
                 gamma: bool,
                 valid: bool,
-                write_image: bool):
+                write_images: bool):
     modelset.data_device = "cpu"
 
     if opt_pose:
@@ -137,17 +137,17 @@ def render_sets(modelset : ModelParams,
         if valid:
             print("valid")
             render_set(modelset.model_path, "valid", scene.loaded_iter, scene.getValidCameras(), 
-                       gaussians, pipeline, background, gamma, write_image=write_image)
+                       gaussians, pipeline, background, gamma, write_images=write_images)
         
         if not skip_train:
             print("train")
             render_set(modelset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), 
-                       gaussians, pipeline, background, gamma, write_image=write_image)
+                       gaussians, pipeline, background, gamma, write_images=write_images)
 
         if not skip_test:
             print("test")
             render_set(modelset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), 
-                       gaussians, pipeline, background, gamma, write_image=write_image)
+                       gaussians, pipeline, background, gamma, write_images=write_images)
             
 if __name__ == "__main__":
     # Set up command line argument parser
@@ -161,7 +161,8 @@ if __name__ == "__main__":
     parser.add_argument("--gamma", action="store_true", default=False)
     parser.add_argument("--opt_pose", action="store_true", default=False)
     parser.add_argument("--valid", action="store_true", default=False)
-    parser.add_argument("--write_image", action="store_true", default=False)
+    parser.add_argument("--write_images", action="store_true", default=False)
+    
     # 加载训练模型所使用的参数
     args = get_combined_args(parser)
     args.wang_debug = False
@@ -181,4 +182,4 @@ if __name__ == "__main__":
     safe_state(args.quiet)
 
     render_sets(model.extract(args), args.load_iteration, pipeline.extract(args), \
-                args.skip_train, args.skip_test, args.opt_pose, args.gamma, args.valid, args.write_image)
+                args.skip_train, args.skip_test, args.opt_pose, args.gamma, args.valid, args.write_images)
